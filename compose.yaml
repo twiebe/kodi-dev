@@ -14,6 +14,20 @@ services:
       - "127.0.0.1:${JELLYFIN_PORT:-8096}:8096"
     restart: unless-stopped
 
+  # Passes requests through to Jellyfin, fails selected ones: ./kdev fault
+  faultproxy:
+    image: python:3.13-alpine
+    user: "${UID:-1000}:${GID:-1000}"
+    command: ["python3", "-u", "/app/faultproxy.py"]
+    volumes:
+      - ./faultproxy:/app:ro
+      - ./data/faults:/data
+    ports:
+      - "127.0.0.1:${FAULTPROXY_PORT:-8097}:8096"
+    depends_on:
+      - jellyfin
+    restart: unless-stopped
+
   kodi:
     build:
       context: ./kodi

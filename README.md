@@ -14,6 +14,7 @@ read the log, take screenshots and check the server state.
 |------------|--------------------------------------------------------------------|------------------|
 | `kodi`     | Debian with Kodi `${KODI_VERSION}` (default 21.3), Xvfb + software GL, PulseAudio null sink | 8080 JSON-RPC, 5900 VNC |
 | `jellyfin` | `jellyfin/jellyfin:${JELLYFIN_VERSION}` (default 12.3)              | 8096             |
+| `faultproxy` | Proxy in front of Jellyfin that fails selected requests (`kdev fault`) | 8097           |
 
 - The add-on under test is bind-mounted into Kodi's add-ons folder, so code
   changes are live. Python service code needs `./kdev restart`.
@@ -88,7 +89,34 @@ it in. `profiles/plugin.video.jellycon.py` writes JellyCon's settings and
 ./kdev userdata tester 'Kdev Alpha'                    # played state + resume position
 ./kdev user tester [enable|disable]                    # e.g. to provoke 401s
 ./kdev jf GET /Users                                   # any API call with the admin key
+
+# Fault injection (add-on must use http://faultproxy:8096 as server address)
+./kdev fault add 'IncludeItemTypes=Movie' --times 1    # answer with 500 once
+./kdev fault add '^/system/info$' --method GET --status 503
+./kdev fault add 'PlayedItems' --drop --times 4        # close the connection, no answer
+./kdev fault add '/Sessions/Playing' --delay 30        # pass on after 30 s (read timeout)
+./kdev fault add 'IncludeItemTypes=Audio' --delay 8 --times 1  # hold one request, e.g. to quit Kodi mid-sync
+./kdev fault show | clear                              # rules and requests they hit
 ```
+
+## Fault injection
+
+`faultproxy` passes every request through to Jellyfin unless it matches a rule
+from `kdev fault add`. MATCH is a regular expression searched in the request
+path including the query string, ignoring case. The first matching rule wins.
+Rules live in `data/faults/faults.json`, are read on every request and counted
+down with `--times`; hits are logged to `data/faults/faults.log` (emptied by
+`kdev fault clear`). WebSocket connections and chunked request bodies are
+piped through unchanged.
+
+Each request gets its own upstream connection, so every request is checked
+even when the client keeps its connection open.
+
+To wait for a delayed request before acting, poll the log:
+`until ./kdev fault show | grep -q DELAY; do sleep 0.5; done`.
+
+To route an add-on through it, set its server address to
+`http://faultproxy:8096` (from the host: `http://localhost:8097`).
 
 Watch Kodi live with a VNC client on `localhost:5900` (no password) of the
 machine running Docker.
@@ -105,8 +133,52 @@ services:
       - /path/to/other.addon:/home/kodi/.kodi/addons/other.addon.id
 ```
 
+Every mounted folder needs an `addon.xml`. Add-ons that generate it (JellyCon,
+Jellyfin for Kodi: `python build.py`) keep it git-ignored, so a fresh clone or
+`git worktree` has none: copy it over. Without it Kodi logs "Unable to find
+plugin" and disables the add-on; enable it again with
+`./kdev rpc Addons.SetAddonEnabled '{"addonid":"<id>","enabled":true}'`.
+
+### Jellyfin for Kodi (plugin.video.jellyfin)
+
+There is no profile for it yet. After mounting it, sign in once by hand
+(VNC, or `kdev action`): server `http://jellyfin:8096` (or
+`http://faultproxy:8096` for fault injection), "Manual login", `tester` /
+`tester`. Its state lives in `data/kodi/userdata/addon_data/plugin.video.jellyfin/`
+and in `Database/jellyfin.db`, the synced items in `MyVideos*.db` and
+`MyMusic*.db`.
+
+- An interrupted full sync stays in `sync.json` (`Libraries`,
+  `RestorePoint`). The next start asks "Resume the previous sync?", and until
+  that is answered every new sync is refused with "A sync is already running".
+  To start clean, stop Kodi (`docker compose stop kodi`), empty both keys and
+  start it again (`kdev restart` starts a stopped Kodi).
+- `RunPlugin(plugin://plugin.video.jellyfin/?mode=synclib&id=<library id>)`
+  adds and syncs a library, `mode=updatelib` updates one, `mode=removelib`
+  removes it. Library ids: `./kdev jf GET /Library/VirtualFolders` (`ItemId`).
+- Unit tests and linters run outside Docker: `pip install pytest black flake8`
+  into a venv, then `pytest`, `black --check .`, `flake8` in the checkout.
+
+## Testing tips
+
+- Read Kodi's databases from the host with `sqlite3`, e.g.
+  `data/kodi/userdata/Database/MyVideos131.db`. Rows of a transaction that is
+  still open are not visible there yet. To change them, stop Kodi first.
+- `kdev log` shows the current Kodi run only; `kdev log -a` includes the
+  previous one (`kodi.old.log`), which is where an exit or crash ends up after
+  `kdev restart`.
+- `kdev screenshot NAME` takes a name, not a path; it prints where the PNG is.
+- `kdev user tester disable` makes JellyCon show its "login rejected" dialog;
+  after enabling the user again, `kdev seed` refreshes JellyCon's login.
+- Media you add for a test (folders under `data/media/`, extra libraries)
+  stays until removed: delete the folder, then
+  `./kdev jf POST /Library/Refresh`, or the library with
+  `./kdev jf DELETE '/Library/VirtualFolders?name=<name>'`.
+
 ## Known quirks
 
-- Kodi waits for add-on service threads on exit. If they do not stop,
-  `kdev restart` kills Kodi after 20 seconds (it says so).
+- Kodi waits for add-on service threads on exit and kills each service after
+  5 seconds. JellyCon always, and Jellyfin for Kodi right after start, take
+  that long, so with both mounted Kodi can need more than 20 seconds to exit.
+  `kdev restart` then kills it (it says so); nothing is lost but the log tail.
 - Seeking lands on keyframes, which are up to 25 s apart in the test clips.
