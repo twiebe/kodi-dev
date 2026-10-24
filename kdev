@@ -148,7 +148,7 @@ def wait_for(check, timeout, what):
 # --- environment lifecycle --------------------------------------------------
 
 def ensure_dirs():
-    for path in ('kodi', 'jellyfin/config', 'jellyfin/cache', 'media'):
+    for path in ('kodi', 'jellyfin/config', 'jellyfin/cache', 'media', 'faults'):
         os.makedirs(os.path.join(DATA, path), exist_ok=True)
 
 
@@ -174,6 +174,12 @@ def cmd_wait(args):
 
 def cmd_restart(args):
     """Restart Kodi only (the entrypoint relaunches it), e.g. after code changes."""
+    if 'kodi' not in compose('ps', '--status', 'running', '--services', capture=True).split():
+        # Stopped container, e.g. to edit its databases: start it instead
+        compose('start', 'kodi')
+        wait_for(kodi_ready, 180, 'Kodi start')
+        print('kdev: Kodi started')
+        return
     kodi_exec('rm', '-f', '/tmp/kodi-dev-ready')
     try:
         rpc('Application.Quit')
@@ -409,6 +415,59 @@ def cmd_userdata(args):
                      indent=2))
 
 
+# --- fault injection --------------------------------------------------------
+
+FAULTS = os.path.join(DATA, 'faults', 'faults.json')
+FAULT_LOG = os.path.join(DATA, 'faults', 'faults.log')
+
+
+def load_faults():
+    try:
+        with open(FAULTS) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {'rules': []}
+
+
+def cmd_fault(args):
+    """Fail requests that go through the fault proxy (http://faultproxy:8096)."""
+    ensure_dirs()
+    if args.action == 'clear':
+        faults = {'rules': []}
+        open(FAULT_LOG, 'w').close()
+    else:
+        faults = load_faults()
+    if args.match and args.action != 'add':
+        die('only fault add takes MATCH')
+    if args.action == 'add':
+        if not args.match:
+            die('fault add needs MATCH, a regular expression for the request path')
+        rule = {'match': args.match}
+        if args.method:
+            rule['method'] = args.method.upper()
+        if args.drop:
+            rule['drop'] = True
+        elif args.delay is not None:
+            rule['delay'] = args.delay
+        else:
+            rule['status'] = args.status
+        if args.times is not None:
+            rule['times'] = args.times
+        faults['rules'].append(rule)
+    if args.action in ('add', 'clear'):
+        # Replace the file in one step, the proxy reads and writes it too
+        tmp = FAULTS + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(faults, f, indent=2)
+        os.replace(tmp, FAULTS)
+    print(json.dumps(faults, indent=2))
+    if os.path.exists(FAULT_LOG):
+        with open(FAULT_LOG) as f:
+            hits = f.read().splitlines()
+        if hits:
+            print('fired:', *hits[-args.lines:], sep='\n  ')
+
+
 def main():
     parser = argparse.ArgumentParser(prog='kdev', description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -462,6 +521,19 @@ def main():
     p.add_argument('user')
     p.add_argument('item', help='item id or name from seed.json, e.g. "Kdev Alpha" or "Kdev Show Pilot"')
     p.set_defaults(func=cmd_userdata)
+
+    p = sub.add_parser('fault', help='fail requests to Jellyfin that go through the fault proxy',
+                       description='The add-on must use http://faultproxy:8096 as server address. '
+                                   'Rules fire on requests whose path matches MATCH, a regular expression.')
+    p.add_argument('action', choices=('show', 'add', 'clear'))
+    p.add_argument('match', nargs='?')
+    p.add_argument('--method', help='only requests with this HTTP method')
+    p.add_argument('--status', type=int, default=500, help='answer with this status (default 500)')
+    p.add_argument('--drop', action='store_true', help='close the connection without an answer')
+    p.add_argument('--delay', type=float, help='pass the request on after this many seconds')
+    p.add_argument('--times', type=int, help='fire this many times only')
+    p.add_argument('-n', '--lines', type=int, default=20, help='fired requests to show')
+    p.set_defaults(func=cmd_fault)
 
     args = parser.parse_args()
     args.func(args)
