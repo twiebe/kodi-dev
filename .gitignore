@@ -1,0 +1,4 @@
+/data/
+/.env
+/compose.override.yaml
+__pycache__/

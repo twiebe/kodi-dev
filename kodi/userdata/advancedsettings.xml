@@ -1,0 +1,4 @@
+<advancedsettings version="1.0">
+    <!-- Debug logging: every add-on log.debug() ends up in kodi.log -->
+    <loglevel hide="false">1</loglevel>
+</advancedsettings>
