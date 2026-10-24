@@ -1,0 +1,15 @@
+<settings version="2">
+    <!-- JSON-RPC over HTTP on port 8080, without authentication (published on 127.0.0.1 only) -->
+    <setting id="services.webserver">true</setting>
+    <setting id="services.webserverport">8080</setting>
+    <setting id="services.webserverauthentication">false</setting>
+    <!-- Event server for kodi-send (only reachable inside the container) -->
+    <setting id="services.esenabled">true</setting>
+    <setting id="services.esallinterfaces">false</setting>
+    <!-- Allow zip installs, never update add-ons behind our back -->
+    <setting id="addons.unknownsources">true</setting>
+    <setting id="general.addonupdates">2</setting>
+    <setting id="general.addonnotifications">false</setting>
+    <!-- Kodi rejects the file without this element -->
+    <resolutions />
+</settings>
