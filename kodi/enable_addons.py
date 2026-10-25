@@ -2,6 +2,9 @@
 
 Kodi disables add-ons it finds on disk that were not installed through Kodi
 itself. Mounted dev add-ons and their dependencies would stay disabled.
+
+Add-on ids listed in temp/kodi-dev-keep-disabled (one per line) are left
+alone, e.g. to keep the Jellyfin add-ons quiet during perf runs.
 """
 import json
 import os
@@ -31,9 +34,17 @@ def main(addons_dir):
         print('kodi-dev: JSON-RPC not reachable, add-ons not enabled', file=sys.stderr)
         return
 
+    keep_disabled = os.path.join(os.path.dirname(addons_dir), 'temp', 'kodi-dev-keep-disabled')
+    try:
+        with open(keep_disabled) as f:
+            skip = set(f.read().split())
+    except OSError:
+        skip = set()
     result = rpc('Addons.GetAddons', {'enabled': False, 'properties': ['path']})
     for addon in result.get('result', {}).get('addons', []):
-        if os.path.realpath(addon['path']).startswith(addons_dir + os.sep):
+        if addon['addonid'] in skip:
+            print('kodi-dev: left {} disabled'.format(addon['addonid']))
+        elif os.path.realpath(addon['path']).startswith(addons_dir + os.sep):
             rpc('Addons.SetAddonEnabled', {'addonid': addon['addonid'], 'enabled': True})
             print('kodi-dev: enabled {}'.format(addon['addonid']))
     # Marker for `kdev wait`: Kodi is up and dev add-ons are enabled
