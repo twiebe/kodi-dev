@@ -1,0 +1,3 @@
+# Output of perf/run.py and perf/matrix.sh
+results*.jsonl
+matrix.out

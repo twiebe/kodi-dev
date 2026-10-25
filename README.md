@@ -175,6 +175,25 @@ and in `Database/jellyfin.db`, the synced items in `MyVideos*.db` and
   `./kdev jf POST /Library/Refresh`, or the library with
   `./kdev jf DELETE '/Library/VirtualFolders?name=<name>'`.
 
+## Performance measurements
+
+`perf/` measures Kodi with the Arctic Fuse 3 skin and the TMDb Helper service:
+
+1. `perf/setup_skin.py` copies the local checkouts of the skin, TMDb Helper
+   and Skin Variables into `data/kodi/addons` and downloads what they need.
+2. `perf/install_hook.sh` adds a timing hook to the TMDb Helper copy. It logs
+   `PERF` lines with the Kodi API calls of the service and how long they took.
+3. `./kdev restart`, then switch the skin to Arctic Fuse 3.
+4. `perf/run.py SCENARIO [--service on|off]` runs a scenario (`idle-home`,
+   `scroll-movies`, `settings`) for 60 s and prints Kodi's CPU per thread
+   group, the frame rate and the service's API timings. `perf/matrix.sh` runs
+   all of them with the service off and on, twice.
+
+`perf/run.py` keeps the Jellyfin add-ons disabled through
+`data/kodi/temp/kodi-dev-keep-disabled`; delete that file to get them back.
+`perf/plugin.video.kodidev.slowwidget` is a widget source that answers after
+`?delay=` seconds, to see a skin's loading indicators.
+
 ## Known quirks
 
 - Kodi waits for add-on service threads on exit and kills each service after
