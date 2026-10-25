@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<addon id="plugin.video.kodidev.slowwidget" name="kodi-dev slow widget" version="1.0.0" provider-name="kodi-dev">
+    <requires>
+        <import addon="xbmc.python" version="3.0.0"/>
+    </requires>
+    <extension point="xbmc.python.pluginsource" library="default.py">
+        <provides>video</provides>
+    </extension>
+    <extension point="xbmc.addon.metadata">
+        <summary lang="en_GB">Random movies, delivered after a delay</summary>
+        <description lang="en_GB">Test widget for kodi-dev: sleeps ?delay= seconds (default 8), then lists random movies from the library, to see the skin's busy indicators.</description>
+        <platform>all</platform>
+    </extension>
+</addon>
