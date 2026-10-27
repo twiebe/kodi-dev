@@ -75,6 +75,7 @@ it in. `profiles/plugin.video.jellycon.py` writes JellyCon's settings and
 
 ```sh
 ./kdev up | down | wait | restart | reset --yes | seed
+./kdev -i NAME <command>                               # same on instance NAME (see Instances)
 
 # Kodi
 ./kdev ls 'plugin://plugin.video.jellycon/'            # list a directory (runs the plugin)
@@ -99,6 +100,33 @@ it in. `profiles/plugin.video.jellycon.py` writes JellyCon's settings and
 ./kdev fault add '/MediaSegments/' --body '{"Items":[]}'   # canned answer (200, JSON)
 ./kdev fault show | clear                              # rules and requests they hit
 ```
+
+## Instances
+
+Several environments can run side by side, e.g. for agents testing different
+add-ons or branches at the same time. `-i NAME` (or `KDEV_INSTANCE=NAME`) puts
+any command on instance NAME: its own compose project `kodi-dev-NAME`, data
+folder `instances/NAME/data/` and host ports. The default environment
+(`data/`, project `kodi-dev`) stays as it is.
+
+```sh
+./kdev -i b reset --yes          # create, start and seed instance b
+./kdev -i b rpc JSONRPC.Ping     # every command takes -i
+./kdev instances                 # all environments, state and ports
+./kdev -i b remove --yes         # stop it and delete its data
+```
+
+- Ports come from a free slot k: Jellyfin 8096+10k, fault proxy 8097+10k,
+  JSON-RPC 8080+10k, VNC 5900+k, written to `instances/NAME/ports.env`.
+- `instances/NAME/.env` overrides `.env` for that instance, e.g. another
+  `ADDON_DIR`/`ADDON_ID`. `compose.override.yaml` applies to all instances.
+- Add-on sources are mounted live into every instance: two instances on
+  different branches of one add-on need two checkouts (e.g. a git worktree).
+- One instance takes about 0.7 GB RAM; Kodi uses 1 to 2 cores while it plays.
+- Each Docker daemon only sees its own containers, but `/workspaces` may be
+  shared between machines or devcontainers: there, instances also keep the
+  data folders apart.
+- `perf/` works on the default environment only.
 
 ## Fault injection
 

@@ -8,6 +8,8 @@ import argparse
 import importlib.util
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -16,10 +18,13 @@ import urllib.parse
 import urllib.request
 
 ROOT = os.path.dirname(os.path.realpath(__file__))
-DATA = os.path.join(ROOT, 'data')
-SEED_FILE = os.path.join(DATA, 'seed.json')
-KODI_HOME = os.path.join(DATA, 'kodi')
-KODI_LOG = os.path.join(KODI_HOME, 'temp', 'kodi.log')
+INSTANCES = os.path.join(ROOT, 'instances')
+# Host ports of the default environment; instance k adds 10*k (VNC: k)
+PORTS = {'JELLYFIN_PORT': 8096, 'FAULTPROXY_PORT': 8097, 'KODI_RPC_PORT': 8080, 'KODI_VNC_PORT': 5900}
+
+# Set by use_instance(): the default environment uses data/ and project kodi-dev
+INSTANCE = None
+PROJECT = DATA = SEED_FILE = KODI_HOME = KODI_LOG = FAULTS = FAULT_LOG = None
 
 JF_ADMIN = ('admin', 'admin')
 JF_USERS = [('tester', 'tester'), ('nopass', '')]
@@ -44,18 +49,62 @@ MEDIA = [
 SHOW_NFO = ('shows', 'Kdev Show/tvshow.nfo', '<tvshow><title>Kdev Show</title><year>2003</year></tvshow>')
 
 
-def env():
-    """Values from .env, overridden by the process environment."""
+def read_env(path):
     values = {}
-    path = os.path.join(ROOT, '.env')
     if os.path.exists(path):
         for line in open(path):
             line = line.strip()
             if line and not line.startswith('#') and '=' in line:
                 key, value = line.split('=', 1)
                 values[key.strip()] = value.strip().strip('"\'')
-    values.update({k: v for k, v in os.environ.items() if k in values or k.startswith(('KODI_', 'JELLYFIN_', 'ADDON_'))})
     return values
+
+
+def env():
+    """Values from .env, then for an instance its .env and ports, overridden by the
+    process environment."""
+    values = read_env(os.path.join(ROOT, '.env'))
+    if INSTANCE:
+        folder = os.path.join(INSTANCES, INSTANCE)
+        values.update(read_env(os.path.join(folder, '.env')))
+        values.update(read_env(os.path.join(folder, 'ports.env')))
+    values.update({k: v for k, v in os.environ.items() if k in values or k.startswith(('KODI_', 'JELLYFIN_', 'ADDON_'))})
+    values['KDEV_DATA'] = DATA
+    return values
+
+
+def instance_names():
+    if not os.path.isdir(INSTANCES):
+        return []
+    return sorted(n for n in os.listdir(INSTANCES) if os.path.exists(os.path.join(INSTANCES, n, 'ports.env')))
+
+
+def use_instance(name):
+    """Point kdev at the default environment (name None) or at an instance: its own
+    compose project, data folder and host ports, created on first use."""
+    global INSTANCE, PROJECT, DATA, SEED_FILE, KODI_HOME, KODI_LOG, FAULTS, FAULT_LOG
+    INSTANCE = name or None
+    if INSTANCE is None:
+        PROJECT, DATA = 'kodi-dev', os.path.join(ROOT, 'data')
+    else:
+        if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,30}', INSTANCE):
+            die('instance names are lower case letters, digits and -, e.g. save-password')
+        folder = os.path.join(INSTANCES, INSTANCE)
+        PROJECT, DATA = 'kodi-dev-' + INSTANCE, os.path.join(folder, 'data')
+        ports = os.path.join(folder, 'ports.env')
+        if not os.path.exists(ports):
+            used = {read_env(os.path.join(INSTANCES, n, 'ports.env')).get('KDEV_SLOT') for n in instance_names()}
+            slot = next(k for k in range(1, 100) if str(k) not in used)
+            os.makedirs(folder, exist_ok=True)
+            with open(ports, 'w') as f:
+                f.write('KDEV_SLOT={}\n'.format(slot))
+                for key, port in PORTS.items():
+                    f.write('{}={}\n'.format(key, port + (slot if key == 'KODI_VNC_PORT' else 10 * slot)))
+    SEED_FILE = os.path.join(DATA, 'seed.json')
+    KODI_HOME = os.path.join(DATA, 'kodi')
+    KODI_LOG = os.path.join(KODI_HOME, 'temp', 'kodi.log')
+    FAULTS = os.path.join(DATA, 'faults', 'faults.json')
+    FAULT_LOG = os.path.join(DATA, 'faults', 'faults.log')
 
 
 def die(message):
@@ -66,8 +115,9 @@ def die(message):
 # --- docker -----------------------------------------------------------------
 
 def compose(*args, check=True, capture=False):
-    cmd = ['docker', 'compose'] + list(args)
-    result = subprocess.run(cmd, cwd=ROOT, text=True,
+    cmd = ['docker', 'compose', '-p', PROJECT] + list(args)
+    # Variables of the process override .env when compose fills in compose.yaml
+    result = subprocess.run(cmd, cwd=ROOT, text=True, env=dict(os.environ, **env()),
                             stdout=subprocess.PIPE if capture else None)
     if check and result.returncode != 0:
         die('`{}` failed'.format(' '.join(cmd)))
@@ -199,14 +249,47 @@ def cmd_restart(args):
     print('kdev: Kodi restarted')
 
 
-def cmd_reset(args):
-    if not args.yes:
-        die('this deletes {} (Kodi profile, Jellyfin config, media); add --yes'.format(DATA))
-    compose('down')
+def cmd_instances(args):
+    rows = [('(default)', 'kodi-dev', env_for(None))] + [(n, 'kodi-dev-' + n, env_for(n)) for n in instance_names()]
+    for name, project, values in rows:
+        running = subprocess.run(['docker', 'compose', '-p', project, 'ps', '--status', 'running', '-q'],
+                                 cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.split()
+        print('{:<16} {:<8} jellyfin {:<5} faultproxy {:<5} rpc {:<5} vnc {:<5} {}'.format(
+            name, 'up' if running else 'down', values['JELLYFIN_PORT'], values['FAULTPROXY_PORT'],
+            values['KODI_RPC_PORT'], values['KODI_VNC_PORT'], values.get('ADDON_ID', '')))
+
+
+def env_for(name):
+    previous = INSTANCE
+    use_instance(name)
+    values = dict({k: str(v) for k, v in PORTS.items()}, **env())
+    use_instance(previous)
+    return values
+
+
+def wipe_data():
     # Containers may have created files as another user: delete from inside one
     if os.path.isdir(DATA):
         subprocess.run(['docker', 'run', '--rm', '-v', DATA + ':/data', 'alpine:3.20',
                         'sh', '-c', 'rm -rf /data/* /data/.[!.]*'], check=True)
+
+
+def cmd_remove(args):
+    if not INSTANCE:
+        die('remove deletes an instance, pick one with -i NAME (the default environment: reset)')
+    if not args.yes:
+        die('this deletes instance {} with all its data; add --yes'.format(INSTANCE))
+    compose('down')
+    wipe_data()
+    shutil.rmtree(os.path.join(INSTANCES, INSTANCE))
+    print('kdev: instance {} removed'.format(INSTANCE))
+
+
+def cmd_reset(args):
+    if not args.yes:
+        die('this deletes {} (Kodi profile, Jellyfin config, media); add --yes'.format(DATA))
+    compose('down')
+    wipe_data()
     cmd_up(args)
     cmd_seed(args)
 
@@ -417,8 +500,6 @@ def cmd_userdata(args):
 
 # --- fault injection --------------------------------------------------------
 
-FAULTS = os.path.join(DATA, 'faults', 'faults.json')
-FAULT_LOG = os.path.join(DATA, 'faults', 'faults.log')
 
 
 def load_faults():
@@ -475,10 +556,17 @@ def cmd_fault(args):
 def main():
     parser = argparse.ArgumentParser(prog='kdev', description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('-i', '--instance', default=os.environ.get('KDEV_INSTANCE'),
+                        help='work on a separate instance with its own containers, data and ports '
+                             '(also KDEV_INSTANCE); created on first use, e.g. ./kdev -i b reset --yes')
     sub = parser.add_subparsers(dest='cmd', required=True)
 
     sub.add_parser('up', help='build and start Kodi and Jellyfin, wait until ready').set_defaults(func=cmd_up)
     sub.add_parser('down', help='stop the environment').set_defaults(func=cmd_down)
+    sub.add_parser('instances', help='list the default environment and the instances').set_defaults(func=cmd_instances)
+    p = sub.add_parser('remove', help='stop an instance and delete it with its data')
+    p.add_argument('--yes', action='store_true')
+    p.set_defaults(func=cmd_remove)
     sub.add_parser('wait', help='wait until Kodi and Jellyfin are ready').set_defaults(func=cmd_wait)
     sub.add_parser('restart', help='restart Kodi (reloads add-on code)').set_defaults(func=cmd_restart)
     p = sub.add_parser('reset', help='wipe all data, start and seed from scratch')
@@ -542,6 +630,7 @@ def main():
     p.set_defaults(func=cmd_fault)
 
     args = parser.parse_args()
+    use_instance(args.instance)
     args.func(args)
 
 
