@@ -7,9 +7,9 @@ services:
     image: jellyfin/jellyfin:${JELLYFIN_VERSION:-12.3}
     user: "${UID:-1000}:${GID:-1000}"
     volumes:
-      - ./data/jellyfin/config:/config
-      - ./data/jellyfin/cache:/cache
-      - ./data/media:/media:ro
+      - ${KDEV_DATA:-./data}/jellyfin/config:/config
+      - ${KDEV_DATA:-./data}/jellyfin/cache:/cache
+      - ${KDEV_DATA:-./data}/media:/media:ro
     ports:
       - "127.0.0.1:${JELLYFIN_PORT:-8096}:8096"
     # The image checks every 30 s; Kodi waits for the first healthy check
@@ -27,7 +27,7 @@ services:
     command: ["python3", "-u", "/app/faultproxy.py"]
     volumes:
       - ./faultproxy:/app:ro
-      - ./data/faults:/data
+      - ${KDEV_DATA:-./data}/faults:/data
     ports:
       - "127.0.0.1:${FAULTPROXY_PORT:-8097}:8096"
     depends_on:
@@ -46,7 +46,7 @@ services:
     environment:
       KODI_RESOLUTION: ${KODI_RESOLUTION:-1280x720}
     volumes:
-      - ./data/kodi:/home/kodi/.kodi
+      - ${KDEV_DATA:-./data}/kodi:/home/kodi/.kodi
       - ${ADDON_DIR:?set ADDON_DIR in .env}:/home/kodi/.kodi/addons/${ADDON_ID:?set ADDON_ID in .env}
     ports:
       - "127.0.0.1:${KODI_RPC_PORT:-8080}:8080"
