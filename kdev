@@ -447,10 +447,14 @@ def cmd_fault(args):
             rule['method'] = args.method.upper()
         if args.drop:
             rule['drop'] = True
+        elif args.body is not None:
+            rule['body'] = args.body
+            rule['status'] = args.status or 200
+            rule['content_type'] = args.content_type
         elif args.delay is not None:
             rule['delay'] = args.delay
         else:
-            rule['status'] = args.status
+            rule['status'] = args.status or 500
         if args.times is not None:
             rule['times'] = args.times
         faults['rules'].append(rule)
@@ -528,7 +532,9 @@ def main():
     p.add_argument('action', choices=('show', 'add', 'clear'))
     p.add_argument('match', nargs='?')
     p.add_argument('--method', help='only requests with this HTTP method')
-    p.add_argument('--status', type=int, default=500, help='answer with this status (default 500)')
+    p.add_argument('--status', type=int, help='answer with this status (default 500, 200 with --body)')
+    p.add_argument('--body', help='answer with this response body instead of passing the request on')
+    p.add_argument('--content-type', default='application/json', help='content type of --body (default application/json)')
     p.add_argument('--drop', action='store_true', help='close the connection without an answer')
     p.add_argument('--delay', type=float, help='pass the request on after this many seconds')
     p.add_argument('--times', type=int, help='fire this many times only')
