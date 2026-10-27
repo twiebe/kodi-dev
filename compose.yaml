@@ -12,6 +12,12 @@ services:
       - ./data/media:/media:ro
     ports:
       - "127.0.0.1:${JELLYFIN_PORT:-8096}:8096"
+    # The image checks every 30 s; Kodi waits for the first healthy check
+    healthcheck:
+      test: ["CMD", "curl", "--noproxy", "localhost", "-fsS", "http://localhost:8096/health"]
+      interval: 2s
+      timeout: 5s
+      retries: 90
     restart: unless-stopped
 
   # Passes requests through to Jellyfin, fails selected ones: ./kdev fault
@@ -45,6 +51,8 @@ services:
     ports:
       - "127.0.0.1:${KODI_RPC_PORT:-8080}:8080"
       - "127.0.0.1:${KODI_VNC_PORT:-5900}:5900"
+    # Add-ons log in at Kodi start; with Jellyfin not up yet they stay logged out
     depends_on:
-      - jellyfin
+      jellyfin:
+        condition: service_healthy
     restart: unless-stopped
