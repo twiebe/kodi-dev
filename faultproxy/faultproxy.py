@@ -9,7 +9,9 @@ Every request is passed through unchanged unless it matches a rule in
 
 "match" is a regular expression searched in the request target, ignoring
 case, "method" is optional,
-"status" answers with that HTTP status, "drop": true closes the connection
+"status" answers with that HTTP status, "body" answers with that text instead
+(status 200 unless "status" is set, "content_type" defaults to
+application/json), "drop": true closes the connection
 without an answer (a connection error for the client), "delay" waits that
 many seconds before passing the request on (a read timeout for the client).
 "times" limits how often a rule fires; it is counted down in the file.
@@ -114,6 +116,13 @@ class Handler(socketserver.BaseRequestHandler):
         rule = None if upgrade else take_rule(method, target)
         if rule and rule.get('drop'):
             log('DROP {} {}'.format(method, target))
+            return
+        if rule and 'body' in rule:
+            status = rule.get('status', 200)
+            body = rule['body'].encode()
+            log('BODY {} {} {}'.format(status, method, target))
+            client.sendall('HTTP/1.1 {} Fault\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n'
+                           .format(status, rule.get('content_type', 'application/json'), len(body)).encode() + body)
             return
         if rule and 'status' in rule:
             log('{} {} {}'.format(rule['status'], method, target))

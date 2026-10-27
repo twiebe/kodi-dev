@@ -96,14 +96,19 @@ it in. `profiles/plugin.video.jellycon.py` writes JellyCon's settings and
 ./kdev fault add 'PlayedItems' --drop --times 4        # close the connection, no answer
 ./kdev fault add '/Sessions/Playing' --delay 30        # pass on after 30 s (read timeout)
 ./kdev fault add 'IncludeItemTypes=Audio' --delay 8 --times 1  # hold one request, e.g. to quit Kodi mid-sync
+./kdev fault add '/MediaSegments/' --body '{"Items":[]}'   # canned answer (200, JSON)
 ./kdev fault show | clear                              # rules and requests they hit
 ```
 
 ## Fault injection
 
 `faultproxy` passes every request through to Jellyfin unless it matches a rule
-from `kdev fault add`. MATCH is a regular expression searched in the request
-path including the query string, ignoring case. The first matching rule wins.
+from `kdev fault add`. A rule answers with a status (`--status`, default
+500), a canned body (`--body TEXT`, status 200 unless `--status` is given,
+`--content-type` defaults to `application/json`), drops the connection
+(`--drop`) or delays the request (`--delay`). MATCH is a regular expression
+searched in the request path including the query string, ignoring case. The
+first matching rule wins.
 Rules live in `data/faults/faults.json`, are read on every request and counted
 down with `--times`; hits are logged to `data/faults/faults.log` (emptied by
 `kdev fault clear`). WebSocket connections and chunked request bodies are
