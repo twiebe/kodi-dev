@@ -114,8 +114,19 @@ def die(message):
 
 # --- docker -----------------------------------------------------------------
 
+def compose_files():
+    """compose.yaml and compose.override.yaml, plus instances/NAME/compose.yaml for an
+    instance, e.g. to mount another checkout of an add-on or skin."""
+    files = ['compose.yaml']
+    if os.path.exists(os.path.join(ROOT, 'compose.override.yaml')):
+        files.append('compose.override.yaml')
+    if INSTANCE and os.path.exists(os.path.join(INSTANCES, INSTANCE, 'compose.yaml')):
+        files.append(os.path.join(INSTANCES, INSTANCE, 'compose.yaml'))
+    return [arg for f in files for arg in ('-f', f)]
+
+
 def compose(*args, check=True, capture=False):
-    cmd = ['docker', 'compose', '-p', PROJECT] + list(args)
+    cmd = ['docker', 'compose', '-p', PROJECT] + compose_files() + list(args)
     # Variables of the process override .env when compose fills in compose.yaml
     result = subprocess.run(cmd, cwd=ROOT, text=True, env=dict(os.environ, **env()),
                             stdout=subprocess.PIPE if capture else None)

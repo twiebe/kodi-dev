@@ -119,7 +119,10 @@ folder `instances/NAME/data/` and host ports. The default environment
 - Ports come from a free slot k: Jellyfin 8096+10k, fault proxy 8097+10k,
   JSON-RPC 8080+10k, VNC 5900+k, written to `instances/NAME/ports.env`.
 - `instances/NAME/.env` overrides `.env` for that instance, e.g. another
-  `ADDON_DIR`/`ADDON_ID`. `compose.override.yaml` applies to all instances.
+  `ADDON_DIR`/`ADDON_ID`. `compose.override.yaml` applies to all instances;
+  `instances/NAME/compose.yaml` is added on top for that instance only, e.g. to
+  mount a git worktree of a skin instead of the main checkout (same target path
+  replaces the mount).
 - Add-on sources are mounted live into every instance: two instances on
   different branches of one add-on need two checkouts (e.g. a git worktree).
 - One instance takes about 0.7 GB RAM; Kodi uses 1 to 2 cores while it plays.
