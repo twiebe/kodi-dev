@@ -5,6 +5,8 @@ Run `./kdev -h` for the command list. Everything uses the Python standard
 library only, so it runs on the host, in a devcontainer or in CI.
 """
 import argparse
+import contextlib
+import glob
 import importlib.util
 import json
 import os
@@ -16,6 +18,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 
 ROOT = os.path.dirname(os.path.realpath(__file__))
 INSTANCES = os.path.join(ROOT, 'instances')
@@ -73,6 +76,11 @@ def env():
     return values
 
 
+def kodi_user():
+    """The Jellyfin user add-on profiles sign in as."""
+    return env().get('KDEV_USER', 'tester')
+
+
 def instance_names():
     if not os.path.isdir(INSTANCES):
         return []
@@ -93,18 +101,55 @@ def use_instance(name):
         PROJECT, DATA = 'kodi-dev-' + INSTANCE, os.path.join(folder, 'data')
         ports = os.path.join(folder, 'ports.env')
         if not os.path.exists(ports):
-            used = {read_env(os.path.join(INSTANCES, n, 'ports.env')).get('KDEV_SLOT') for n in instance_names()}
-            slot = next(k for k in range(1, 100) if str(k) not in used)
+            slot = free_slot(*slots_in_use())
             os.makedirs(folder, exist_ok=True)
             with open(ports, 'w') as f:
                 f.write('KDEV_SLOT={}\n'.format(slot))
-                for key, port in PORTS.items():
-                    f.write('{}={}\n'.format(key, port + (slot if key == 'KODI_VNC_PORT' else 10 * slot)))
+                for key, port in slot_ports(slot).items():
+                    f.write('{}={}\n'.format(key, port))
     SEED_FILE = os.path.join(DATA, 'seed.json')
     KODI_HOME = os.path.join(DATA, 'kodi')
     KODI_LOG = os.path.join(KODI_HOME, 'temp', 'kodi.log')
     FAULTS = os.path.join(DATA, 'faults', 'faults.json')
     FAULT_LOG = os.path.join(DATA, 'faults', 'faults.log')
+
+
+def slot_ports(slot):
+    return {key: port + (slot if key == 'KODI_VNC_PORT' else 10 * slot) for key, port in PORTS.items()}
+
+
+def free_slot(used_slots, busy_ports):
+    """First slot k >= 1 that no instance has and whose ports nobody listens on."""
+    return next(k for k in range(1, 100)
+                if k not in used_slots and not busy_ports & set(slot_ports(k).values()))
+
+
+def parse_docker_ports(lines):
+    """Host ports from `docker ps --format {{.Ports}}`, e.g. 127.0.0.1:8117->8096/tcp."""
+    return {int(port) for line in lines for port in re.findall(r':(\d+)->', line)}
+
+
+def slots_in_use():
+    """Slots of the instances in this checkout, plus the ports of the instances in the other
+    git worktrees of kodi-dev (each has its own instances/) and the host ports Docker
+    publishes right now."""
+    worktrees = subprocess.run(['git', 'worktree', 'list', '--porcelain'], cwd=ROOT, text=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+    roots = {ROOT} | {os.path.realpath(line[9:]) for line in worktrees.splitlines() if line.startswith('worktree ')}
+    slots, ports = set(), set()
+    for root in roots:
+        folder = os.path.join(root, 'instances')
+        for name in os.listdir(folder) if os.path.isdir(folder) else []:
+            values = read_env(os.path.join(folder, name, 'ports.env'))
+            if root == ROOT and values.get('KDEV_SLOT', '').isdigit():
+                slots.add(int(values['KDEV_SLOT']))
+            ports |= {int(v) for k, v in values.items() if k in PORTS and v.isdigit()}
+    try:
+        published = subprocess.run(['docker', 'ps', '--format', '{{.Ports}}'], text=True,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+    except OSError:
+        published = ''
+    return slots, ports | parse_docker_ports(published.splitlines())
 
 
 def die(message):
@@ -227,10 +272,20 @@ def cmd_down(args):
     compose('down')
 
 
+def jellyfin_ready():
+    # While it starts, Jellyfin 12 answers from a temporary server that it then shuts down
+    status, info = jf('GET', '/System/Info/Public')
+    return status == 200 and isinstance(info, dict) and bool(info.get('Id'))
+
+
 def cmd_wait(args):
     wait_for(kodi_ready, 180, 'Kodi')
-    wait_for(lambda: jf('GET', '/System/Info/Public')[0] == 200, 180, 'Jellyfin')
+    wait_for(jellyfin_ready, 180, 'Jellyfin')
     print('kdev: Kodi and Jellyfin are up')
+
+
+def kodi_pids():
+    return set(kodi_exec('pgrep', '-x', 'kodi.bin', check=False, capture=True).split())
 
 
 def cmd_restart(args):
@@ -241,21 +296,22 @@ def cmd_restart(args):
         wait_for(kodi_ready, 180, 'Kodi start')
         print('kdev: Kodi started')
         return
+    old = kodi_pids()
     kodi_exec('rm', '-f', '/tmp/kodi-dev-ready')
     try:
         rpc('Application.Quit')
     except (SystemExit, OSError):
         pass
-
-    def kodi_gone():
-        return kodi_exec('pgrep', '-x', 'kodi.bin', check=False, capture=True).strip() == ''
-    # Kodi hangs on exit when an add-on's Python threads do not stop
-    deadline = time.time() + 20
-    while not kodi_gone() and time.time() < deadline:
+    # The entrypoint starts the next Kodi as soon as this one is gone: wait for the old process
+    # only. Kodi hangs on exit when an add-on's Python threads do not stop.
+    for _ in range(20):
+        if not old & kodi_pids():
+            break
         time.sleep(1)
-    if not kodi_gone():
-        print('kdev: Kodi did not exit within 20s, killing it', file=sys.stderr)
-        kodi_exec('pkill', '-KILL', '-x', 'kodi.bin', check=False)
+    else:
+        for pid in sorted(old & kodi_pids()):
+            print('kdev: Kodi did not exit within 20s, killing it', file=sys.stderr)
+            kodi_exec('kill', '-KILL', pid, check=False)
     wait_for(kodi_ready, 180, 'Kodi restart')
     print('kdev: Kodi restarted')
 
@@ -278,10 +334,11 @@ def env_for(name):
     return values
 
 
-def wipe_data():
+def wipe_data(path=None):
     # Containers may have created files as another user: delete from inside one
-    if os.path.isdir(DATA):
-        subprocess.run(['docker', 'run', '--rm', '-v', DATA + ':/data', 'alpine:3.20',
+    path = path or DATA
+    if os.path.isdir(path):
+        subprocess.run(['docker', 'run', '--rm', '-v', path + ':/data', 'alpine:3.20',
                         'sh', '-c', 'rm -rf /data/* /data/.[!.]*'], check=True)
 
 
@@ -299,6 +356,9 @@ def cmd_remove(args):
 def cmd_reset(args):
     if not args.yes:
         die('this deletes {} (Kodi profile, Jellyfin config, media); add --yes'.format(DATA))
+    if INSTANCE in pool_workers():
+        pool_reset([INSTANCE], start=True)
+        return
     compose('down')
     wipe_data()
     cmd_up(args)
@@ -401,15 +461,39 @@ def load_profile(addon_id):
     return module
 
 
+def profile_ids():
+    """ADDON_ID and every other add-on in the Kodi profile that has a profile in profiles/."""
+    addon_id = env().get('ADDON_ID')
+    ids = [addon_id] if addon_id else []
+    for name in sorted(os.listdir(os.path.join(ROOT, 'profiles'))):
+        other = name[:-3]
+        if name.endswith('.py') and other not in ids and os.path.isdir(os.path.join(KODI_HOME, 'addons', other)):
+            ids.append(other)
+    return [i for i in ids if os.path.exists(os.path.join(ROOT, 'profiles', i + '.py'))]
+
+
+def apply_profiles(seed, args):
+    """Run the add-on profiles while Kodi is stopped (add-ons may write their settings on exit)."""
+    ids = profile_ids()
+    if not ids:
+        return
+    running = 'kodi' in compose('ps', '--status', 'running', '--services', capture=True).split()
+    if running:
+        compose('stop', 'kodi')
+    for addon_id in ids:
+        print('kdev: applying profile {} for {}'.format(addon_id, kodi_user()))
+        load_profile(addon_id).seed(sys.modules[__name__], seed, args)
+    if running:
+        compose('start', 'kodi')
+        wait_for(kodi_ready, 180, 'Kodi start')
+        print('kdev: Kodi started')
+
+
 def cmd_seed(args):
     ensure_dirs()
     seed_media()
     seed = seed_jellyfin()
-    addon_id = env().get('ADDON_ID')
-    profile = load_profile(addon_id) if addon_id else None
-    if profile:
-        print('kdev: applying profile ' + addon_id)
-        profile.seed(sys.modules[__name__], seed, args)
+    apply_profiles(seed, args)
 
 
 # --- Kodi interaction -------------------------------------------------------
@@ -564,6 +648,290 @@ def cmd_fault(args):
             print('fired:', *hits[-args.lines:], sep='\n  ')
 
 
+# --- pool -------------------------------------------------------------------
+# N independent environments (instances pool-0, pool-1, ...) for parallel tests, each with its
+# own Jellyfin, fault proxy and Kodi. They start as copies of one seeded environment, the
+# pool's template in instances/pool/data: Jellyfin config, media (hard links), the Kodi
+# profile (kodi-template) and seed.json, taken together so the Kodi library matches the server.
+
+POOL = 'pool'
+POOL_RESERVE_GB = 1.5   # left for everything else on the machine
+POOL_WORKER_GB = 1.0    # one Kodi (about 410 MB), its Jellyfin (about 280 MB) and fault proxy
+POOL_MAX = 8
+# Not copied into the Kodi template: screenshots, logs, downloaded zips, perf/ leftovers
+TEMPLATE_SKIP = ('screenshots/*', 'addons/packages/*', 'temp/*.log', 'temp/*.out', 'temp/kodi-dev-keep-disabled')
+# Device ids of the add-ons: each worker makes its own
+TEMPLATE_RESET = ('temp/jellycon_guid', 'userdata/addon_data/plugin.video.jellyfin/jellyfin_guid')
+
+POOL_WORKER_COMPOSE = '''\
+# Written by kdev pool up: add-on folders mounted in every worker
+services:
+  kodi:
+    volumes:
+{volumes}'''
+
+
+def pool_size(available, cores, running=0, reserve=POOL_RESERVE_GB, per_worker=POOL_WORKER_GB,
+              maximum=POOL_MAX):
+    """Number of workers that fit into AVAILABLE GB (MemAvailable). A running pool already
+    took its share, so its workers count as available. Returns (N, explanation)."""
+    usable = available + running * per_worker
+    by_memory = int((usable - reserve) / per_worker + 1e-9)
+    n = max(1, min(by_memory, cores // 2, maximum))
+    credit = ' + running pool {:.1f} GB'.format(usable - available) if usable > available else ''
+    return n, ('(MemAvailable {:.1f} GB{} - reserve {} GB) / {} GB per worker = {}, '
+               'cores {} / 2 = {}, max {}: N = {}'.format(available, credit, reserve, per_worker,
+                                                          by_memory, cores, cores // 2, maximum, n))
+
+
+def worker_compose(mounts):
+    """compose.yaml of a worker: the add-on MOUNTS on top of the default setup, None without."""
+    if not mounts:
+        return None
+    return POOL_WORKER_COMPOSE.format(volumes=''.join('      - {}\n'.format(m) for m in mounts))
+
+
+def mem_available_gb():
+    for line in open('/proc/meminfo'):
+        if line.startswith('MemAvailable:'):
+            return int(line.split()[1]) / 1024 ** 2
+    die('no MemAvailable in /proc/meminfo')
+
+
+@contextlib.contextmanager
+def on_instance(name):
+    previous = INSTANCE
+    use_instance(name)
+    try:
+        yield
+    finally:
+        use_instance(previous)
+
+
+def running_services():
+    return set(compose('ps', '--status', 'running', '--services', capture=True).split())
+
+
+def write_file(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as f:
+        f.write(text)
+
+
+def pool_workers():
+    names = [n for n in instance_names() if n.startswith(POOL + '-') and n[len(POOL) + 1:].isdigit()]
+    return sorted(names, key=lambda n: int(n[len(POOL) + 1:]))
+
+
+def docker(*args, check=True, capture=True):
+    result = subprocess.run(['docker', *args], text=True, stdout=subprocess.PIPE if capture else None,
+                            stderr=subprocess.PIPE if capture else None)
+    if check and result.returncode != 0:
+        die('`docker {}` failed: {}'.format(' '.join(args), (result.stderr or '').strip()))
+    return result
+
+
+def in_use_by_container(path):
+    """Whether a running container mounts PATH or something below it."""
+    ids = docker('ps', '-q').stdout.split()
+    if not ids:
+        return False
+    mounts = docker('inspect', '--format', '{{range .Mounts}}{{println .Source}}{{end}}', *ids).stdout.split()
+    path = os.path.realpath(path)
+    return any(m == path or m.startswith(path + os.sep) for m in mounts)
+
+
+def copy_tree(source, target, link=False):
+    """Copy the contents of SOURCE into TARGET; LINK hard-links files where possible."""
+    os.makedirs(target, exist_ok=True)
+    if link and subprocess.run(['cp', '-al', source + '/.', target], stderr=subprocess.DEVNULL).returncode == 0:
+        return
+    subprocess.run(['cp', '-a', source + '/.', target], check=True)
+
+
+def pool_data():
+    return os.path.join(INSTANCES, POOL, 'data')
+
+
+def pool_template():
+    return os.path.join(pool_data(), 'kodi-template')
+
+
+def pool_copy_source(source):
+    """Make the pool's template from a seeded kodi-dev data folder."""
+    if not source or not os.path.exists(os.path.join(source, 'seed.json')):
+        die('{} holds no seeded environment: run ./kdev seed there first, or pass --from with '
+            'another data folder'.format(source))
+    if in_use_by_container(source):
+        die('{} is in use by running containers; stop that environment while the pool copies it '
+            '(once), or pass --from with another data folder'.format(source))
+    print('kdev: copying Jellyfin, media and the Kodi profile from {} as pool template'.format(source))
+    copy_tree(os.path.join(source, 'jellyfin', 'config'), os.path.join(pool_data(), 'jellyfin', 'config'))
+    copy_tree(os.path.join(source, 'media'), os.path.join(pool_data(), 'media'), link=True)
+    copy_tree(os.path.join(source, 'kodi'), pool_template())
+    for pattern in TEMPLATE_SKIP:
+        for path in glob.glob(os.path.join(pool_template(), pattern)):
+            shutil.rmtree(path) if os.path.isdir(path) and not os.path.islink(path) else os.remove(path)
+    shutil.copy(os.path.join(source, 'seed.json'), os.path.join(pool_data(), 'seed.json'))
+
+
+def addon_mounts(folders):
+    mounts = []
+    for folder in folders:
+        folder = os.path.realpath(folder)
+        try:
+            addon_id = ET.parse(os.path.join(folder, 'addon.xml')).getroot().get('id')
+        except (OSError, ET.ParseError) as e:
+            die('{} is no add-on folder ({})'.format(folder, e))
+        mounts.append('{}:/home/kodi/.kodi/addons/{}'.format(folder, addon_id))
+    return mounts
+
+
+def pool_worker(name, mounts, fresh):
+    """Write the worker's compose file (MOUNTS None keeps it); with FRESH or on first use give
+    it a new copy of the template."""
+    with on_instance(name):
+        compose_file = os.path.join(INSTANCES, name, 'compose.yaml')
+        if mounts is not None:
+            text = worker_compose(mounts)
+            if text:
+                write_file(compose_file, text)
+            elif os.path.exists(compose_file):
+                os.remove(compose_file)
+        if fresh or not os.path.exists(SEED_FILE):
+            compose('down')
+            wipe_data()
+            ensure_dirs()
+            print('kdev: {} gets a copy of the pool template'.format(name))
+            copy_tree(os.path.join(pool_data(), 'jellyfin', 'config'), os.path.join(DATA, 'jellyfin', 'config'))
+            copy_tree(os.path.join(pool_data(), 'media'), os.path.join(DATA, 'media'), link=True)
+            copy_tree(pool_template(), KODI_HOME)
+            for path in TEMPLATE_RESET:
+                if os.path.exists(os.path.join(KODI_HOME, path)):
+                    os.remove(os.path.join(KODI_HOME, path))
+            shutil.copy(os.path.join(pool_data(), 'seed.json'), SEED_FILE)
+            # the profiles sign the add-ons in on the worker's own Jellyfin
+            compose('up', '-d', 'jellyfin')
+            wait_for(jellyfin_ready, 180, 'Jellyfin of ' + name)
+            apply_profiles(load_seed(), argparse.Namespace())
+
+
+def pool_start(names):
+    for name in names:
+        with on_instance(name):
+            ensure_dirs()
+            compose('up', '-d', '--build')
+    for name in names:
+        with on_instance(name):
+            wait_for(kodi_ready, 300, 'Kodi of ' + name)
+            wait_for(jellyfin_ready, 180, 'Jellyfin of ' + name)
+    print('kdev: pool workers up: ' + ' '.join(names))
+
+
+def pool_running():
+    """Number of running workers"""
+    running = 0
+    for name in pool_workers():
+        with on_instance(name):
+            running += 'kodi' in running_services()
+    return running
+
+
+def pool_up(args):
+    size = args.size or os.environ.get('KDEV_POOL_SIZE')
+    if size:
+        n = int(size)
+        print('kdev: pool size {} (given)'.format(n))
+    else:
+        n, text = pool_size(mem_available_gb(), os.cpu_count(), pool_running())
+        print('kdev: pool size ' + text)
+    if not os.path.exists(os.path.join(pool_data(), 'seed.json')):
+        pool_copy_source(args.source)
+    names = ['{}-{}'.format(POOL, k) for k in range(n)]
+    mounts = addon_mounts(args.addon) if args.addon else None
+    for name in names:
+        pool_worker(name, mounts, fresh=False)
+    for name in pool_workers():
+        if name not in names:
+            with on_instance(name):
+                if running_services():
+                    print('kdev: stopping ' + name)
+                    compose('down')
+    pool_start(names)
+
+
+def pool_down(args):
+    for name in pool_workers():
+        with on_instance(name):
+            compose('down')
+
+
+def pool_reset(names, start=False):
+    """New copies of the template for the workers NAMES. Starts the ones that ran before,
+    with START all of them."""
+    running = []
+    for name in names:
+        with on_instance(name):
+            if start or running_services():
+                running.append(name)
+    for name in names:
+        pool_worker(name, None, fresh=True)
+    if running:
+        pool_start(running)
+
+
+def rss_mib(container):
+    """Resident memory of all processes in a running container, in MiB (docker stats and
+    docker top do not work under every runtime, /proc does)."""
+    result = docker('exec', container, 'sh', '-c',
+                    "cat /proc/[0-9]*/status 2>/dev/null | awk '/^VmRSS/ {s += $2} END {print s}'", check=False)
+    return int(result.stdout.strip()) / 1024 if result.returncode == 0 and result.stdout.strip().isdigit() else None
+
+
+def pool_status(args):
+    def mib(project, service):
+        value = rss_mib('{}-{}-1'.format(project, service))
+        return '{:.0f} MiB'.format(value) if value is not None else '-'
+    if not os.path.exists(os.path.join(pool_data(), 'seed.json')):
+        print('kdev: no pool, start one with ./kdev pool up')
+        return
+    for name in pool_workers():
+        with on_instance(name):
+            values = env()
+            state = 'up' if 'kodi' in running_services() else 'down'
+            compose_file = os.path.join(INSTANCES, name, 'compose.yaml')
+            mounts = re.findall(r'- (\S+):/home/kodi', open(compose_file).read()) if os.path.exists(compose_file) else []
+            print('{:<8} {:<5} rpc {:<5} vnc {:<5} jellyfin {:<5} faultproxy {:<5} kodi {:>9} jellyfin {:>9} {}'.format(
+                name, state, values['KODI_RPC_PORT'], values['KODI_VNC_PORT'], values['JELLYFIN_PORT'],
+                values['FAULTPROXY_PORT'], mib(PROJECT, 'kodi'), mib(PROJECT, 'jellyfin'), ' '.join(mounts)))
+    print('kdev: ' + pool_size(mem_available_gb(), os.cpu_count(), pool_running())[1])
+
+
+def pool_remove(args):
+    if not args.yes:
+        die('this deletes the pool with its workers, template and data; add --yes')
+    pool_down(args)
+    for name in pool_workers() + [POOL]:
+        folder = os.path.join(INSTANCES, name)
+        if os.path.isdir(folder):
+            wipe_data(os.path.join(folder, 'data'))
+            shutil.rmtree(folder)
+    print('kdev: pool removed')
+
+
+def cmd_pool(args):
+    if args.action == 'up':
+        pool_up(args)
+    elif args.action == 'down':
+        pool_down(args)
+    elif args.action == 'status':
+        pool_status(args)
+    elif args.action == 'reset':
+        pool_reset(pool_workers())
+    elif args.action == 'remove':
+        pool_remove(args)
+
+
 def main():
     parser = argparse.ArgumentParser(prog='kdev', description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -585,6 +953,21 @@ def main():
     p.set_defaults(func=cmd_reset)
     sub.add_parser('seed', help='create test media, Jellyfin users/libraries, apply add-on profile'
                    ).set_defaults(func=cmd_seed)
+
+    p = sub.add_parser('pool', help='N independent environments (pool-0 ...) for parallel tests',
+                       description='up [N]: start the pool (N from free memory when omitted, or KDEV_POOL_SIZE); '
+                                   'down: stop it, keep data; status: workers, ports, memory; '
+                                   'reset: new copies of the template for all workers; remove --yes: delete it')
+    p.add_argument('action', choices=('up', 'down', 'status', 'reset', 'remove'))
+    p.add_argument('size', nargs='?', type=int, help='number of workers (up only)')
+    p.add_argument('--addon', '--skin', action='append', metavar='DIR',
+                   help='mount this add-on folder in every worker instead of the configured one, '
+                        'e.g. a skin worktree (up only, repeatable)')
+    p.add_argument('--from', dest='source', default=os.path.join(ROOT, 'data'),
+                   help='seeded data folder the pool copies its template from on first use '
+                        '(default: data/ of the default environment)')
+    p.add_argument('--yes', action='store_true')
+    p.set_defaults(func=cmd_pool)
 
     p = sub.add_parser('rpc', help='call a Kodi JSON-RPC method')
     p.add_argument('method')
