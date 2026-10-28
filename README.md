@@ -66,16 +66,21 @@ Start over from nothing: `./kdev reset --yes` (deletes `data/`).
 
 ### Add-on profiles
 
-`profiles/<addon id>.py` is applied by `./kdev seed` when `ADDON_ID` matches.
+`profiles/<addon id>.py` is applied by `./kdev seed` for `ADDON_ID` and for
+every other add-on in the Kodi profile that has one, while Kodi is stopped.
 It gets the `kdev` module and the seed data and prepares the add-on, e.g. logs
-it in. `profiles/plugin.video.jellycon.py` writes JellyCon's settings and
-`auth.json` for user `tester`, so Kodi starts logged in without any dialogs.
+it in as `kdev.kodi_user()` (`tester` unless `KDEV_USER` says otherwise).
+`profiles/plugin.video.jellycon.py` writes JellyCon's settings and
+`auth.json`, so Kodi starts logged in without any dialogs.
+`profiles/plugin.video.jellyfin.py` signs Jellyfin for Kodi in (`data.json`,
+server and user settings) and leaves its synced library alone.
 
 ## kdev commands
 
 ```sh
 ./kdev up | down | wait | restart | reset --yes | seed
 ./kdev -i NAME <command>                               # same on instance NAME (see Instances)
+./kdev pool up [N] | down | status | reset | remove --yes   # parallel test pool (see Pool)
 
 # Kodi
 ./kdev ls 'plugin://plugin.video.jellycon/'            # list a directory (runs the plugin)
@@ -101,6 +106,8 @@ it in. `profiles/plugin.video.jellycon.py` writes JellyCon's settings and
 ./kdev fault show | clear                              # rules and requests they hit
 ```
 
+`python3 -m unittest discover tests` runs kdev's unit tests (no Docker needed).
+
 ## Instances
 
 Several environments can run side by side, e.g. for agents testing different
@@ -117,7 +124,10 @@ folder `instances/NAME/data/` and host ports. The default environment
 ```
 
 - Ports come from a free slot k: Jellyfin 8096+10k, fault proxy 8097+10k,
-  JSON-RPC 8080+10k, VNC 5900+k, written to `instances/NAME/ports.env`.
+  JSON-RPC 8080+10k, VNC 5900+k, written to `instances/NAME/ports.env`. A slot
+  is free when no instance of this checkout has it and none of its ports is
+  taken by an instance of another git worktree of kodi-dev or published by a
+  running container.
 - `instances/NAME/.env` overrides `.env` for that instance, e.g. another
   `ADDON_DIR`/`ADDON_ID`. `compose.override.yaml` applies to all instances;
   `instances/NAME/compose.yaml` is added on top for that instance only, e.g. to
@@ -130,6 +140,52 @@ folder `instances/NAME/data/` and host ports. The default environment
   shared between machines or devcontainers: there, instances also keep the
   data folders apart.
 - `perf/` works on the default environment only.
+
+## Pool
+
+A pool runs one test suite on several environments at once: N workers
+(instances `pool-0` to `pool-N-1`), each a full environment with its own
+Jellyfin, fault proxy and Kodi, so tests that change the library, played state
+or server settings on one worker never reach another.
+
+```sh
+./kdev pool up                   # N from free memory, see below
+./kdev pool up 4                 # or KDEV_POOL_SIZE=4
+./kdev pool up --skin /workspaces/kodi-skin-retrowave-home   # mount a worktree in every worker
+./kdev pool status               # workers, ports, memory (RSS) per container
+./kdev -i pool-2 log -g ERROR    # every instance command works on a worker
+./kdev pool reset                # new copies of the template for all workers
+./kdev pool down                 # stop, keep data
+./kdev pool remove --yes         # delete the pool with its template and data
+```
+
+- On first use the pool copies a seeded data folder (default `data/`, or
+  `--from DIR`, e.g. `instances/b/data`) as its template in
+  `instances/pool/data`: Jellyfin config, media (hard links), the Kodi profile
+  (`kodi-template`, without screenshots, logs and `addons/packages`) and
+  `seed.json`, taken together so the Kodi library matches the server. That
+  environment must be stopped for the copy. To take a newer one, `pool remove
+  --yes` and `pool up --from DIR` again.
+- A worker starts as a copy of the template; the add-on profiles sign it in as
+  `tester` on its own Jellyfin. `pool reset` (or `kdev -i pool-K reset --yes`
+  for one worker) copies the template again.
+- Workers have the mounts of the default setup (`.env`, `compose.override.yaml`).
+  `--skin DIR` (or `--addon DIR`, repeatable) mounts DIR as the add-on its
+  `addon.xml` names, in all workers until the next `pool up` with mounts.
+- N, when not given: (MemAvailable - 1.5 GB reserve) / 1.0 GB per worker, at
+  most cores / 2 and 8, at least 1. A running pool counts as available, so
+  `pool up` again keeps its size. `pool up` prints the calculation, `pool
+  status` the current one.
+- A worker's Kodi with Arctic Fuse or Retrowave and a library of 1000 movies
+  takes 500 to 600 MB, its Jellyfin about 330 MB, a fault proxy 15 MB.
+
+pytest with pytest-xdist, one xdist worker per Kodi, e.g. the skin's e2e
+suite (its `tests/e2e/conftest.py` maps worker `gwK` to `pool-K` when
+`KDEV_POOL` is set):
+
+```sh
+KDEV_POOL=1 pytest tests/e2e -m e2e -n auto --dist loadfile
+```
 
 ## Fault injection
 
@@ -177,7 +233,8 @@ plugin" and disables the add-on; enable it again with
 
 ### Jellyfin for Kodi (plugin.video.jellyfin)
 
-There is no profile for it yet. After mounting it, sign in once by hand
+`kdev seed` signs it in as `tester` (profile), but does not pick libraries:
+on its next start it asks which ones to sync. To sign in by hand instead
 (VNC, or `kdev action`): server `http://jellyfin:8096` (or
 `http://faultproxy:8096` for fault injection), "Manual login", `tester` /
 `tester`. Its state lives in `data/kodi/userdata/addon_data/plugin.video.jellyfin/`
