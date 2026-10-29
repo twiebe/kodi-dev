@@ -503,8 +503,19 @@ def cmd_rpc(args):
     print(json.dumps(rpc(args.method, params), indent=2, ensure_ascii=False))
 
 
+# Sends the builtin to Kodi's event server as a builtin to execute (ACTION_EXECBUILTIN).
+# kodi-send sends it as a button action instead: that goes through the windows like a key press,
+# and Kodi drops every action while the topmost modal dialog plays its close animation
+# ("ignoring action 122" in kodi.log), so a builtin sent right after a dialog closed never ran.
+SEND_BUILTIN = '''import socket, sys
+from kodi.xbmcclient import PacketACTION, ACTION_EXECBUILTIN
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+PacketACTION(actionmessage=sys.argv[1], actiontype=ACTION_EXECBUILTIN).send(sock, ('127.0.0.1', 9777), uid=0)
+'''
+
+
 def cmd_builtin(args):
-    kodi_exec('kodi-send', '--action=' + args.command, capture=True)
+    kodi_exec('python3', '-c', SEND_BUILTIN, args.command, capture=True)
 
 
 def cmd_action(args):
