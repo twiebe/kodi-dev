@@ -97,3 +97,21 @@ class DockerPorts(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class Builtin(unittest.TestCase):
+    """A builtin goes to Kodi as a builtin to execute, not as a button action: Kodi drops actions
+    while the topmost modal dialog plays its close animation."""
+
+    def run_builtin(self, command):
+        calls = []
+        with mock.patch.object(kdev, 'kodi_exec', side_effect=lambda *a, **k: calls.append(a)):
+            kdev.cmd_builtin(mock.Mock(command=command))
+        return calls
+
+    def test_sends_an_execbuiltin_packet(self):
+        (call,) = self.run_builtin('SetFocus(9109)')
+        self.assertNotIn('kodi-send', call)
+        self.assertEqual(call[:2], ('python3', '-c'))
+        self.assertIn('ACTION_EXECBUILTIN', call[2])
+        self.assertEqual(call[3:], ('SetFocus(9109)',))

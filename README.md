@@ -87,7 +87,7 @@ server and user settings) and leaves its synced library alone.
 ./kdev rpc Player.GetActivePlayers                     # any JSON-RPC method
 ./kdev rpc Player.Open '{"item":{"file":"plugin://..."}}'
 ./kdev action down down select contextmenu back        # remote control input
-./kdev builtin 'RunPlugin(plugin://...)'               # Kodi builtin via kodi-send
+./kdev builtin 'RunPlugin(plugin://...)'               # Kodi builtin, executed directly
 ./kdev screenshot [name]                               # prints the PNG path
 ./kdev log [-n 50] [-g pattern] [-a]                   # log of the current Kodi run
 
