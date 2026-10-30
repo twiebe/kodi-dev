@@ -95,9 +95,6 @@ class DockerPorts(unittest.TestCase):
         self.assertEqual(kdev.parse_docker_ports(lines), {8117, 5901, 8090, 9000})
 
 
-if __name__ == '__main__':
-    unittest.main()
-
 
 class Builtin(unittest.TestCase):
     """A builtin goes to Kodi as a builtin to execute, not as a button action: Kodi drops actions
@@ -115,3 +112,74 @@ class Builtin(unittest.TestCase):
         self.assertEqual(call[:2], ('python3', '-c'))
         self.assertIn('ACTION_EXECBUILTIN', call[2])
         self.assertEqual(call[3:], ('SetFocus(9109)',))
+
+
+class MusicLibrary(unittest.TestCase):
+    """The seeded music: what the skins' music tests need (several albums for a home row, an
+    artist with two albums, albums with several tracks), each track tagged and with a cover."""
+
+    def test_albums_for_a_home_row_and_an_artist_with_two(self):
+        albums = [(artist, album) for artist, _, _, albums in kdev.MUSIC for album, _, _ in albums]
+        self.assertGreaterEqual(len(albums), 7)
+        self.assertTrue(any(len(albums) > 1 for _, _, _, albums in kdev.MUSIC))
+        self.assertTrue(any(len(tracks) >= 5 for _, _, _, albums in kdev.MUSIC for _, _, tracks in albums))
+
+    def test_tracks_are_tagged_in_folders_by_artist_and_album(self):
+        tracks = kdev.music_tracks()
+        first = tracks[0]
+        self.assertEqual(first['path'], 'Neon Drift/Afterglow Avenue/01 - Midnight Grid.mp3')
+        self.assertEqual(first['tags'], {'title': 'Midnight Grid', 'artist': 'Neon Drift',
+                                         'album_artist': 'Neon Drift', 'album': 'Afterglow Avenue',
+                                         'track': '1/5', 'date': '2019', 'genre': 'Synthwave'})
+        self.assertEqual(len({t['path'] for t in tracks}), len(tracks))
+        self.assertEqual(len({t['frequency'] for t in tracks}), len(tracks))  # a tone of its own
+
+    def test_cover_per_album_and_pictures_per_artist(self):
+        images = {i['path']: i for i in kdev.music_images()}
+        for artist, _, _, albums in kdev.MUSIC:
+            self.assertIn(artist + '/folder.jpg', images)
+            self.assertIn(artist + '/backdrop.jpg', images)
+            for album, _, _ in albums:
+                self.assertEqual(images['{}/{}/cover.jpg'.format(artist, album)]['text'], album)
+
+    def test_commands_only_for_missing_files(self):
+        tracks, images = kdev.music_tracks(), kdev.music_images()
+        done = {'music/' + t['path'] for t in tracks[1:]} | {'music/' + i['path'] for i in images[1:]}
+        commands = kdev.music_commands('/out', lambda rel: rel in done)
+        self.assertEqual(len(commands), 2)
+        track, image = commands
+        self.assertEqual(track[-1], '/out/music/' + tracks[0]['path'])
+        self.assertIn('album=Afterglow Avenue', track)
+        self.assertIn('track=1/5', track)
+        self.assertIn(str(kdev.MUSIC_SECONDS), ' '.join(track))
+        self.assertEqual(image[-1], '/out/music/' + images[0]['path'])
+        self.assertIn('-frames:v', image)
+
+
+class JellyfinProfile(unittest.TestCase):
+    """profiles/plugin.video.jellyfin.py: no first start dialogs, kdev syncs the libraries."""
+
+    profile = kdev.load_profile('plugin.video.jellyfin')
+
+    def test_libraries_to_sync_skips_synced_ones(self):
+        sync = {'Whitelist': ['m1', 'Mixed:x2'], 'Libraries': []}
+        libraries = {'Movies': 'm1', 'Mixed': 'x2', 'Music': 'u3', 'Shows': 's4'}
+        self.assertEqual(self.profile.libraries_to_sync(sync, libraries), ['u3', 's4'])
+
+    def test_nothing_synced_yet(self):
+        self.assertEqual(self.profile.libraries_to_sync({}, {'Music': 'u3'}), ['u3'])
+
+    def test_one_sync_for_all_libraries(self):
+        # Kodi splits builtin parameters at commas: the id list goes URL encoded
+        self.assertEqual(self.profile.sync_command(['u3', 's4']),
+                         'RunPlugin(plugin://plugin.video.jellyfin/?mode=synclib&id=u3%2Cs4)')
+
+    def test_sync_done_once_whitelisted_and_nothing_left(self):
+        done = self.profile.sync_done
+        self.assertTrue(done({'Whitelist': ['u3', 's4'], 'Libraries': []}, ['u3', 's4']))
+        self.assertFalse(done({'Whitelist': ['u3', 's4'], 'Libraries': ['s4']}, ['u3', 's4']))
+        self.assertFalse(done({'Whitelist': ['u3'], 'Libraries': []}, ['u3', 's4']))
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -63,6 +63,24 @@ Start over from nothing: `./kdev reset --yes` (deletes `data/`).
   Clips are 10 minutes of test pattern with a tone, generated with ffmpeg,
   metadata comes from `.nfo` files (no internet lookups). Ten minutes because
   Jellyfin ignores resume positions in items shorter than 5 minutes.
+- Library `Music` in `media/music/<artist>/<album>/`: 4 artists, 7 albums,
+  30 tracks (`MUSIC` in `kdev`). Each track is 40 seconds of its own tone (MP3),
+  tagged with title, artist, album artist, album, track number, year and genre;
+  each album has a `cover.jpg` with its title, each artist a `folder.jpg` and
+  a `backdrop.jpg`. Jellyfin reads the tags only (no internet lookups).
+
+  | Artist        | Genre     | Albums (year, tracks)                                    |
+  |---------------|-----------|----------------------------------------------------------|
+  | Neon Drift    | Synthwave | Afterglow Avenue (2019, 5), Pulse City (2022, 4)         |
+  | Chrome Saints | Rock      | Rust and Glory (2016, 6), Signal Lost (2021, 3)          |
+  | Kaito Mori    | Ambient   | Tidal Code (2020, 4)                                     |
+  | The Low Orbit | Jazz      | Blue Satellite (2018, 3), Night Shift Sessions (2023, 5) |
+
+- `seed.json` has the library ids (`libraries`) and the ids of movies, shows,
+  episodes and albums by name (`items`).
+- With Jellyfin for Kodi in the Kodi profile and Kodi running, the seed syncs
+  the three libraries into Kodi's library (`MyVideos*.db`, `MyMusic*.db`),
+  see below.
 
 ### Add-on profiles
 
@@ -73,7 +91,9 @@ it in as `kdev.kodi_user()` (`tester` unless `KDEV_USER` says otherwise).
 `profiles/plugin.video.jellycon.py` writes JellyCon's settings and
 `auth.json`, so Kodi starts logged in without any dialogs.
 `profiles/plugin.video.jellyfin.py` signs Jellyfin for Kodi in (`data.json`,
-server and user settings) and leaves its synced library alone.
+server and user settings) and turns off its first start questions; once Kodi
+runs again, its `started()` hook (run by `kdev seed` for every profile that has
+one) syncs the seeded libraries the add-on does not sync yet.
 
 ## kdev commands
 
@@ -163,7 +183,8 @@ or server settings on one worker never reach another.
   `--from DIR`, e.g. `instances/b/data`) as its template in
   `instances/pool/data`: Jellyfin config, media (hard links), the Kodi profile
   (`kodi-template`, without screenshots, logs and `addons/packages`) and
-  `seed.json`, taken together so the Kodi library matches the server. That
+  `seed.json`, taken together so the Kodi library matches the server, the
+  music library included. That
   environment must be stopped for the copy. To take a newer one, `pool remove
   --yes` and `pool up --from DIR` again.
 - A worker starts as a copy of the template; the add-on profiles sign it in as
@@ -233,22 +254,30 @@ plugin" and disables the add-on; enable it again with
 
 ### Jellyfin for Kodi (plugin.video.jellyfin)
 
-`kdev seed` signs it in as `tester` (profile), but does not pick libraries:
-on its next start it asks which ones to sync. To sign in by hand instead
-(VNC, or `kdev action`): server `http://jellyfin:8096` (or
-`http://faultproxy:8096` for fault injection), "Manual login", `tester` /
-`tester`. Its state lives in `data/kodi/userdata/addon_data/plugin.video.jellyfin/`
-and in `Database/jellyfin.db`, the synced items in `MyVideos*.db` and
+`kdev seed` signs it in as `tester` (profile) and syncs `Movies`, `Shows`
+and `Music` into Kodi's library: it marks the first start as done (no library
+choice, Kodi Sync Queue check off, add-on paths, music on), drops an
+interrupted sync, starts Kodi, waits for the add-on and runs
+`mode=synclib` with the libraries that are not in its `sync.json` whitelist
+yet, then waits until they are. Libraries synced before (e.g. by hand) stay.
+That needs Kodi running during `kdev seed` (`kdev up` first).
+
+To sign in by hand instead (VNC, or `kdev action`): server
+`http://jellyfin:8096` (or `http://faultproxy:8096` for fault injection),
+"Manual login", `tester` / `tester`. Its state lives in
+`data/kodi/userdata/addon_data/plugin.video.jellyfin/` and in `Database/jellyfin.db`, the synced items in `MyVideos*.db` and
 `MyMusic*.db`.
 
 - An interrupted full sync stays in `sync.json` (`Libraries`,
   `RestorePoint`). The next start asks "Resume the previous sync?", and until
   that is answered every new sync is refused with "A sync is already running".
   To start clean, stop Kodi (`docker compose stop kodi`), empty both keys and
-  start it again (`kdev restart` starts a stopped Kodi).
+  start it again (`kdev restart` starts a stopped Kodi), or run `kdev seed`.
 - `RunPlugin(plugin://plugin.video.jellyfin/?mode=synclib&id=<library id>)`
   adds and syncs a library, `mode=updatelib` updates one, `mode=removelib`
-  removes it. Library ids: `./kdev jf GET /Library/VirtualFolders` (`ItemId`).
+  removes it. Library ids: `./kdev jf GET /Library/VirtualFolders` (`ItemId`)
+  or `libraries` in `seed.json`. Kodi splits builtin parameters at commas:
+  several ids go as `id=<id>%2C<id>`.
 - Unit tests and linters run outside Docker: `pip install pytest black flake8`
   into a venv, then `pytest`, `black --check .`, `flake8` in the checkout.
 
