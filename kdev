@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -49,7 +50,33 @@ MEDIA = [
     ('shows', 'Kdev Show/Season 01/Kdev Show S01E03.mkv',
      '<episodedetails><title>Third</title><season>1</season><episode>3</episode></episodedetails>'),
 ]
+# The Jellyfin libraries kdev seed creates: (name, collection type, folder)
+LIBRARIES = (('Movies', 'movies', '/media/movies'), ('Shows', 'tvshows', '/media/shows'),
+             ('Music', 'music', '/media/music'))
 SHOW_NFO = ('shows', 'Kdev Show/tvshow.nfo', '<tvshow><title>Kdev Show</title><year>2003</year></tvshow>')
+
+# Test music in media/music/ARTIST/ALBUM: (artist, genre, cover color, [(album, year, tracks)]).
+# Jellyfin builds artists and albums from the tags alone. Each track is a tone of its own,
+# MUSIC_SECONDS long so a test can switch tracks before one ends. Album covers carry the
+# album title (drawtext, so no ' : % or \ in titles).
+MUSIC_SECONDS = 40
+MUSIC = [
+    ('Neon Drift', 'Synthwave', '0xff2d95', [
+        ('Afterglow Avenue', 2019, ['Midnight Grid', 'Chrome Sunset', 'Laser Rain', 'Arcade Heart',
+                                    'Last Train Home']),
+        ('Pulse City', 2022, ['Overdrive', 'Neon Veins', 'Skyline Drive', 'Static Love'])]),
+    ('Chrome Saints', 'Rock', '0xd35400', [
+        ('Rust and Glory', 2016, ['Iron Choir', 'Burning Wire', 'Steel Psalm', 'Ghost Engine',
+                                  'Hollow Crown', 'Wreckage']),
+        ('Signal Lost', 2021, ['Dead Channel', 'Copper Saints', 'Black Box'])]),
+    ('Kaito Mori', 'Ambient', '0x16a085', [
+        ('Tidal Code', 2020, ['Low Tide', 'Server Garden', 'Rain on Glass', 'Quiet Protocol'])]),
+    ('The Low Orbit', 'Jazz', '0x2e86de', [
+        ('Blue Satellite', 2018, ['Orbit Waltz', 'Moonlit Relay', 'Late Transmission']),
+        ('Night Shift Sessions', 2023, ['Coffee at Four', 'Elevator Bossa', 'Neon Ballad',
+                                        'Closing Time', 'Encore'])]),
+]
+MUSIC_FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
 
 
 def read_env(path):
@@ -388,6 +415,77 @@ def seed_media():
                 '-c:a', 'aac', '-b:a', '32k', '/out/{}/{}'.format(lib, rel))
 
 
+def music_tracks():
+    """Every test track: path below media/music, tags and the frequency of its tone."""
+    tracks = []
+    for artist, genre, _, albums in MUSIC:
+        for album, year, titles in albums:
+            for n, title in enumerate(titles, 1):
+                tracks.append({
+                    'path': '{}/{}/{:02d} - {}.mp3'.format(artist, album, n, title),
+                    'tags': {'title': title, 'artist': artist, 'album_artist': artist, 'album': album,
+                             'track': '{}/{}'.format(n, len(titles)), 'date': str(year), 'genre': genre},
+                    # semitones up from 220 Hz
+                    'frequency': round(220 * 2 ** (len(tracks) / 12)),
+                })
+    return tracks
+
+
+def music_images():
+    """Album covers (cover.jpg, with the title) and artist pictures (folder.jpg, backdrop.jpg)."""
+    images = []
+    for artist, _, color, albums in MUSIC:
+        images.append({'path': artist + '/folder.jpg', 'size': (1000, 1000), 'colors': (color, '0x101018'),
+                       'text': artist})
+        images.append({'path': artist + '/backdrop.jpg', 'size': (1920, 1080), 'colors': ('0x101018', color),
+                       'text': None})
+        for i, (album, _, _) in enumerate(albums):
+            images.append({'path': '{}/{}/cover.jpg'.format(artist, album), 'size': (1000, 1000),
+                           'colors': (color, ('0x1b1464', '0xf9ca24')[i % 2]), 'text': album})
+    return images
+
+
+def music_commands(out, exists):
+    """ffmpeg command lines for the music files EXISTS (path below media/) says are missing,
+    writing below OUT (media/ in the container)."""
+    commands = []
+    ffmpeg = ['/usr/lib/jellyfin-ffmpeg/ffmpeg', '-loglevel', 'error', '-y']
+    for track in music_tracks():
+        rel = 'music/' + track['path']
+        if exists(rel):
+            continue
+        tags = [arg for key, value in track['tags'].items() for arg in ('-metadata', '{}={}'.format(key, value))]
+        commands.append(ffmpeg + [
+            '-f', 'lavfi', '-i', 'sine=frequency={}:sample_rate=22050:duration={}'.format(
+                track['frequency'], MUSIC_SECONDS),
+            '-c:a', 'libmp3lame', '-b:a', '32k', '-ac', '1'] + tags + [out + '/' + rel])
+    for image in music_images():
+        rel = 'music/' + image['path']
+        if exists(rel):
+            continue
+        (w, h), (c0, c1) = image['size'], image['colors']
+        graph = 'gradients=s={}x{}:c0={}:c1={}:x0=0:y0=0:x1={}:y1={}:speed=0'.format(w, h, c0, c1, w, h)
+        if image['text']:
+            graph += (",drawtext=fontfile={}:text='{}':fontsize=72:fontcolor=white:"
+                      "x=(w-tw)/2:y=h-th-80").format(MUSIC_FONT, image['text'])
+        commands.append(ffmpeg + ['-f', 'lavfi', '-i', graph, '-frames:v', '1', '-q:v', '3', out + '/' + rel])
+    return commands
+
+
+def seed_music():
+    media = os.path.join(DATA, 'media')
+    commands = music_commands('/out', lambda rel: os.path.exists(os.path.join(media, rel)))
+    if not commands:
+        return
+    print('kdev: generating {} music files in /media/music'.format(len(commands)))
+    for artist, _, _, albums in MUSIC:
+        for album, _, _ in albums:
+            os.makedirs(os.path.join(media, 'music', artist, album), exist_ok=True)
+    # one container for all of them, the files are small
+    compose('run', '--rm', '--no-deps', '-T', '-v', media + ':/out', '--entrypoint', '/bin/sh', 'jellyfin',
+            '-c', ' && '.join(shlex.join(c) for c in commands))
+
+
 def seed_jellyfin():
     status, info = jf('GET', '/System/Info/Public')
     if status != 200:
@@ -425,8 +523,8 @@ def seed_jellyfin():
     no_fetchers = {'LibraryOptions': {
         'EnableRealtimeMonitor': False,
         'TypeOptions': [{'Type': t, 'MetadataFetchers': [], 'ImageFetchers': []}
-                        for t in ('Movie', 'Series', 'Season', 'Episode')]}}
-    for lib_name, ctype, path in (('Movies', 'movies', '/media/movies'), ('Shows', 'tvshows', '/media/shows')):
+                        for t in ('Movie', 'Series', 'Season', 'Episode', 'MusicArtist', 'MusicAlbum', 'Audio')]}}
+    for lib_name, ctype, path in LIBRARIES:
         if lib_name not in folders:
             print('kdev: creating library ' + lib_name)
             query = urllib.parse.urlencode({'name': lib_name, 'collectionType': ctype,
@@ -434,14 +532,19 @@ def seed_jellyfin():
             jf_ok('POST', '/Library/VirtualFolders?' + query, no_fetchers, token=token)
 
     expected = len(MEDIA)
+    expected_music = len(music_tracks())
 
     def scanned():
         res = jf_ok('GET', '/Items?Recursive=true&IncludeItemTypes=Movie,Episode', token=token)
-        return res['TotalRecordCount'] >= expected
+        music = jf_ok('GET', '/Items?Recursive=true&IncludeItemTypes=Audio', token=token)
+        return res['TotalRecordCount'] >= expected and music['TotalRecordCount'] >= expected_music
     if not scanned():
         jf_ok('POST', '/Library/Refresh', token=token)
         wait_for(scanned, 300, 'library scan')
-    items = jf_ok('GET', '/Items?Recursive=true&IncludeItemTypes=Movie,Series,Episode', token=token)['Items']
+    seed['libraries'] = {f['Name']: f['ItemId'] for f in jf_ok('GET', '/Library/VirtualFolders', token=token)
+                         if f['Name'] in [lib[0] for lib in LIBRARIES]}
+    items = jf_ok('GET', '/Items?Recursive=true&IncludeItemTypes=Movie,Series,Episode,MusicAlbum',
+                  token=token)['Items']
     seed['items'] = {i['Name'] if i['Type'] != 'Episode' else '{} {}'.format(i['SeriesName'], i['Name']): i['Id']
                      for i in items}
 
@@ -473,7 +576,8 @@ def profile_ids():
 
 
 def apply_profiles(seed, args):
-    """Run the add-on profiles while Kodi is stopped (add-ons may write their settings on exit)."""
+    """Run the add-on profiles while Kodi is stopped (add-ons may write their settings on exit).
+    When Kodi ran before, start it again and run the profiles' started() hooks, e.g. a library sync."""
     ids = profile_ids()
     if not ids:
         return
@@ -487,11 +591,15 @@ def apply_profiles(seed, args):
         compose('start', 'kodi')
         wait_for(kodi_ready, 180, 'Kodi start')
         print('kdev: Kodi started')
-
+        for addon_id in ids:
+            profile = load_profile(addon_id)
+            if hasattr(profile, 'started'):
+                profile.started(sys.modules[__name__], seed, args)
 
 def cmd_seed(args):
     ensure_dirs()
     seed_media()
+    seed_music()
     seed = seed_jellyfin()
     apply_profiles(seed, args)
 
@@ -514,8 +622,12 @@ PacketACTION(actionmessage=sys.argv[1], actiontype=ACTION_EXECBUILTIN).send(sock
 '''
 
 
+def builtin(command):
+    kodi_exec('python3', '-c', SEND_BUILTIN, command, capture=True)
+
+
 def cmd_builtin(args):
-    kodi_exec('python3', '-c', SEND_BUILTIN, args.command, capture=True)
+    builtin(args.command)
 
 
 def cmd_action(args):
