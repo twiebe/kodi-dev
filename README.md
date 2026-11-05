@@ -155,7 +155,9 @@ folder `instances/NAME/data/` and host ports. The default environment
   replaces the mount).
 - Add-on sources are mounted live into every instance: two instances on
   different branches of one add-on need two checkouts (e.g. a git worktree).
-- One instance takes about 0.7 GB RAM; Kodi uses 1 to 2 cores while it plays.
+- One instance takes about 0.7 GB RAM; Kodi uses about 2 cores while it plays and renders
+  at about 95 fps (`KODI_LP_THREADS`, default 2 software GL threads; with all cores Kodi
+  renders at 360 fps on 11 cores, since nothing throttles it on Xvfb).
 - Each Docker daemon only sees its own containers, but `/workspaces` may be
   shared between machines or devcontainers: there, instances also keep the
   data folders apart.
