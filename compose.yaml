@@ -45,6 +45,10 @@ services:
     image: kodi-dev/kodi:${KODI_DEBIAN_SUITE:-forky}
     environment:
       KODI_RESOLUTION: ${KODI_RESOLUTION:-1280x720}
+      # Software GL (llvmpipe) rasterizes on one thread per core by default, and nothing throttles
+      # Kodi's render loop on Xvfb (no vblank): a Kodi playing video then takes 11 cores at 360
+      # fps. Two threads give about 95 fps at 2 cores, playback stays in real time.
+      LP_NUM_THREADS: ${KODI_LP_THREADS:-2}
     volumes:
       - ${KDEV_DATA:-./data}/kodi:/home/kodi/.kodi
       - ${ADDON_DIR:?set ADDON_DIR in .env}:/home/kodi/.kodi/addons/${ADDON_ID:?set ADDON_ID in .env}
