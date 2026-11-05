@@ -798,10 +798,10 @@ TEMPLATE_SKIP = ('screenshots/*', 'addons/packages/*', 'temp/*.log', 'temp/*.out
 TEMPLATE_RESET = ('temp/jellycon_guid', 'userdata/addon_data/plugin.video.jellyfin/jellyfin_guid')
 
 POOL_WORKER_COMPOSE = '''\
-# Written by kdev pool up: add-on folders mounted in every worker
+# Written by kdev pool up: add-on folders mounted in every worker, and its CPU limit
 services:
   kodi:
-    volumes:
+{cpus}    volumes:
 {volumes}'''
 
 
@@ -818,11 +818,15 @@ def pool_size(available, cores, running=0, reserve=POOL_RESERVE_GB, per_worker=P
                                                           by_memory, cores, cores // 2, maximum, n))
 
 
-def worker_compose(mounts):
-    """compose.yaml of a worker: the add-on MOUNTS on top of the default setup, None without."""
-    if not mounts:
+def worker_compose(mounts, cpus=None):
+    """compose.yaml of a worker: the add-on MOUNTS on top of the default setup, and CPUS cores
+    for its Kodi (a float, a test pool only; nothing throttles Kodi's render loop on Xvfb);
+    None without either."""
+    if not mounts and not cpus:
         return None
-    return POOL_WORKER_COMPOSE.format(volumes=''.join('      - {}\n'.format(m) for m in mounts))
+    return POOL_WORKER_COMPOSE.format(
+        cpus='    cpus: {}\n'.format(cpus) if cpus else '',
+        volumes=''.join('      - {}\n'.format(m) for m in mounts or []))
 
 
 def mem_available_gb():
@@ -948,13 +952,13 @@ def addon_mounts(folders):
     return mounts
 
 
-def pool_worker(name, mounts, fresh):
+def pool_worker(name, mounts, fresh, cpus=None):
     """Write the worker's compose file (MOUNTS None keeps it); with FRESH or on first use give
     it a new copy of the template."""
     with on_instance(name):
         compose_file = os.path.join(INSTANCES, name, 'compose.yaml')
         if mounts is not None:
-            text = worker_compose(mounts)
+            text = worker_compose(mounts, cpus)
             if text:
                 write_file(compose_file, text)
             elif os.path.exists(compose_file):
@@ -1011,8 +1015,11 @@ def pool_up(args):
         pool_copy_source(args.source)
     names = ['{}-{}'.format(POOL, k) for k in range(n)]
     mounts = addon_mounts(args.addon) if args.addon else None
+    cpus = args.cpus or os.environ.get('KDEV_POOL_CPUS')
+    if cpus and mounts is None:
+        mounts = []
     for name in names:
-        pool_worker(name, mounts, fresh=False)
+        pool_worker(name, mounts, fresh=False, cpus=cpus)
     for name in pool_workers():
         if name not in names:
             with on_instance(name):
@@ -1132,6 +1139,9 @@ def main():
     p.add_argument('--addon', '--skin', action='append', metavar='DIR',
                    help='mount this add-on folder in every worker instead of the configured one, '
                         'e.g. a skin worktree (up only, repeatable)')
+    p.add_argument('--cpus', type=float, metavar='N',
+                   help='limit each worker\'s Kodi to N cores (also KDEV_POOL_CPUS; up only, '
+                        'written with the mounts, so give --skin again)')
     p.add_argument('--from', dest='source', default=os.path.join(ROOT, 'data'),
                    help='seeded data folder the pool copies its template from on first use '
                         '(default: data/ of the default environment)')
