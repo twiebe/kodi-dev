@@ -86,6 +86,12 @@ class WorkerCompose(unittest.TestCase):
         for word in ('networks', 'profiles', 'jellyfin'):
             self.assertNotIn(word, text)
 
+    def test_cpus_limit_the_kodi(self):
+        text = kdev.worker_compose(['/a:/home/kodi/.kodi/addons/a'], cpus=1.5)
+        self.assertIn('    cpus: 1.5\n    volumes:', text)
+        self.assertIn('    cpus: 2\n', kdev.worker_compose([], cpus=2))
+        self.assertIsNone(kdev.worker_compose([], cpus=None))
+
 
 class Restart(unittest.TestCase):
     """The entrypoint starts a new Kodi as soon as the old one quits: restart waits for the
