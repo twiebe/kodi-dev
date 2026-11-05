@@ -200,6 +200,19 @@ or server settings on one worker never reach another.
 - A worker's Kodi with Arctic Fuse or Retrowave and a library of 1000 movies
   takes 500 to 600 MB, its Jellyfin about 330 MB, a fault proxy 15 MB.
 
+Two pools can run side by side: `KDEV_POOL=NAME` (lower case letters, digits, `-`) selects one
+of its own, with workers `NAME-0`, `NAME-1`, ..., its own template in `instances/NAME/data`,
+ports and compose projects. Unset or `1` is the default pool. Every `kdev pool` command takes
+it, e.g. `KDEV_POOL=e2e ./kdev pool up 4 --skin DIR`. A second pool shares the CPU with the
+first, so give each fewer workers. In another git worktree of kodi-dev pick a name no other
+checkout uses: the compose projects are named after the instance, and only the ports are
+checked across worktrees.
+
+A test run holds `instances/NAME/run.lock` (an exclusive flock, taken by the skin's
+`tests/e2e/conftest.py`) while it runs: a second run on the same pool fails at once, and so do
+`pool up`, `down`, `reset` and `remove` until the run ends; `pool status` names the holder. A
+run that was killed drops the lock with its process.
+
 pytest with pytest-xdist, one xdist worker per Kodi, e.g. the skin's e2e
 suite (its `tests/e2e/conftest.py` maps worker `gwK` to `pool-K` when
 `KDEV_POOL` is set):

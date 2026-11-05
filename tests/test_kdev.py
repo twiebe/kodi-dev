@@ -12,6 +12,41 @@ kdev = importlib.util.module_from_spec(spec)
 loader.exec_module(kdev)
 
 
+class PoolName(unittest.TestCase):
+    def test_default_pool(self):
+        for value in (None, '', '1'):  # KDEV_POOL=1: "on the pool", as the skin's tests set it
+            self.assertEqual(kdev.pool_name(value), 'pool')
+
+    def test_named_pool(self):
+        self.assertEqual(kdev.pool_name('e2e'), 'e2e')
+
+    def test_a_name_must_make_valid_instance_names(self):
+        for value in ('E2E', 'a b', '-x', 'x' * 29):
+            with self.assertRaises(SystemExit):
+                kdev.pool_name(value)
+
+
+class PoolLock(unittest.TestCase):
+    def test_free_without_a_lock_file(self):
+        with mock.patch.object(kdev, 'INSTANCES', '/nonexistent'):
+            self.assertEqual(kdev.pool_in_use(), '')
+
+    def test_held_while_a_run_has_the_flock(self):
+        import fcntl
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(kdev, 'INSTANCES', folder):
+            os.makedirs(os.path.join(folder, kdev.POOL))
+            path = kdev.pool_lock_file()
+            with open(path, 'w') as held:
+                held.write('pid 42 since 01:00')
+                held.flush()
+                fcntl.flock(held, fcntl.LOCK_EX)
+                self.assertEqual(kdev.pool_in_use(), 'pid 42 since 01:00')
+                with self.assertRaises(SystemExit):
+                    kdev.pool_free_or_die('up')
+            self.assertEqual(kdev.pool_in_use(), '')
+
+
 class PoolSize(unittest.TestCase):
     def size(self, available, cores=14, **kw):
         return kdev.pool_size(available, cores, **kw)[0]

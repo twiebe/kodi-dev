@@ -6,6 +6,7 @@ library only, so it runs on the host, in a devcontainer or in CI.
 """
 import argparse
 import contextlib
+import fcntl
 import glob
 import importlib.util
 import json
@@ -777,7 +778,17 @@ def cmd_fault(args):
 # pool's template in instances/pool/data: Jellyfin config, media (hard links), the Kodi
 # profile (kodi-template) and seed.json, taken together so the Kodi library matches the server.
 
-POOL = 'pool'
+def pool_name(value):
+    """The pool KDEV_POOL names: 'pool' when unset or 1, else a pool of its own with workers
+    NAME-0, NAME-1, ..., its own template and ports, so that two pools can run side by side."""
+    if value in (None, '', '1'):
+        return 'pool'
+    if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,27}', value):  # with -K: a valid instance name
+        die('pool names are lower case letters, digits and -, at most 28 characters')
+    return value
+
+
+POOL = pool_name(os.environ.get('KDEV_POOL'))
 POOL_RESERVE_GB = 1.5   # left for everything else on the machine
 POOL_WORKER_GB = 1.0    # one Kodi (about 410 MB), its Jellyfin (about 280 MB) and fault proxy
 POOL_MAX = 8
@@ -876,6 +887,33 @@ def pool_data():
     return os.path.join(INSTANCES, POOL, 'data')
 
 
+def pool_lock_file():
+    """A test run holds an exclusive flock on this file (the skin's conftest takes it) for as
+    long as it runs: a second run on the same pool, or a pool command that would pull the
+    workers out from under it, fails at once instead of colliding for minutes."""
+    return os.path.join(INSTANCES, POOL, 'run.lock')
+
+
+def pool_in_use():
+    """Who holds the pool's run lock: the text the run wrote into it, '' when nobody does."""
+    path = pool_lock_file()
+    if not os.path.exists(path):
+        return ''
+    with open(path) as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return f.read().strip() or 'another run'
+        fcntl.flock(f, fcntl.LOCK_UN)
+    return ''
+
+
+def pool_free_or_die(action):
+    holder = pool_in_use()
+    if holder:
+        die('pool {} is in use by a test run ({}); wait for it or stop it before pool {}'.format(POOL, holder, action))
+
+
 def pool_template():
     return os.path.join(pool_data(), 'kodi-template')
 
@@ -961,6 +999,7 @@ def pool_running():
 
 
 def pool_up(args):
+    pool_free_or_die('up')
     size = args.size or os.environ.get('KDEV_POOL_SIZE')
     if size:
         n = int(size)
@@ -984,6 +1023,7 @@ def pool_up(args):
 
 
 def pool_down(args):
+    pool_free_or_die('down')
     for name in pool_workers():
         with on_instance(name):
             compose('down')
@@ -992,6 +1032,7 @@ def pool_down(args):
 def pool_reset(names, start=False):
     """New copies of the template for the workers NAMES. Starts the ones that ran before,
     with START all of them."""
+    pool_free_or_die('reset')
     running = []
     for name in names:
         with on_instance(name):
@@ -1018,6 +1059,9 @@ def pool_status(args):
     if not os.path.exists(os.path.join(pool_data(), 'seed.json')):
         print('kdev: no pool, start one with ./kdev pool up')
         return
+    holder = pool_in_use()
+    if holder:
+        print('kdev: pool {} is in use by a test run ({})'.format(POOL, holder))
     for name in pool_workers():
         with on_instance(name):
             values = env()
@@ -1033,6 +1077,7 @@ def pool_status(args):
 def pool_remove(args):
     if not args.yes:
         die('this deletes the pool with its workers, template and data; add --yes')
+    pool_free_or_die('remove')
     pool_down(args)
     for name in pool_workers() + [POOL]:
         folder = os.path.join(INSTANCES, name)
@@ -1078,7 +1123,8 @@ def main():
                    ).set_defaults(func=cmd_seed)
 
     p = sub.add_parser('pool', help='N independent environments (pool-0 ...) for parallel tests',
-                       description='up [N]: start the pool (N from free memory when omitted, or KDEV_POOL_SIZE); '
+                       description='KDEV_POOL=NAME selects a pool of its own (workers NAME-0 ...). '
+                                   'up [N]: start the pool (N from free memory when omitted, or KDEV_POOL_SIZE); '
                                    'down: stop it, keep data; status: workers, ports, memory; '
                                    'reset: new copies of the template for all workers; remove --yes: delete it')
     p.add_argument('action', choices=('up', 'down', 'status', 'reset', 'remove'))
