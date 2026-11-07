@@ -112,6 +112,55 @@ class InstallScript(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.setting('locale.language'), 'resource.language.en_gb')
 
+    def fake_tmdbhelper(self, settings=None):
+        """TMDb Helper's language table as the add-on has it: a copy of its consts.py, or a short
+        stand-in when the checkout is not at hand."""
+        real = ROOT.parent / 'plugin-video-themoviedb-helper' / 'resources' / 'tmdbhelper' / 'lib' / 'addon' / 'consts.py'
+        folder = self.data / 'addons' / 'plugin.video.themoviedb.helper' / 'resources' / 'tmdbhelper' / 'lib' / 'addon'
+        folder.mkdir(parents=True)
+        (folder / 'consts.py').write_text(real.read_text() if real.exists() else
+                                          "X = 1\n\nLANGUAGES = (\n    'de-AT', 'de-DE', 'en-US', 'ja-JP',\n    'pt-BR')\n")
+        if settings:
+            path = self.data / 'userdata' / 'addon_data' / 'plugin.video.themoviedb.helper' / 'settings.xml'
+            path.parent.mkdir(parents=True)
+            path.write_text(settings)
+
+    def tmdbhelper_language(self):
+        """The language TMDb Helper looks up in, by its index into LANGUAGES."""
+        import ast
+        import re
+        consts = (self.data / 'addons' / 'plugin.video.themoviedb.helper' / 'resources' / 'tmdbhelper' / 'lib' / 'addon' / 'consts.py').read_text()
+        languages = ast.literal_eval(re.search(r'^LANGUAGES = (\([^)]*\))', consts, re.M).group(1))
+        root = ET.parse(self.data / 'userdata' / 'addon_data' / 'plugin.video.themoviedb.helper' / 'settings.xml').getroot()
+        setting = next(s for s in root.iter('setting') if s.get('id') == 'language')
+        self.assertIsNone(setting.get('default'))
+        return languages[int(setting.text)]
+
+    def test_tmdbhelper_looks_up_in_the_language(self):
+        make_zip(self.cwd, 'skin.confuse', '1.0')
+        self.fake_tmdbhelper('<settings version="2">\n    <setting id="language" default="true">18</setting>\n'
+                             '    <setting id="mpaa_prefix">FSK</setting>\n</settings>\n')
+        (self.data / 'addons' / 'resource.language.de_de').mkdir()
+        (self.data / 'addons' / 'resource.language.de_de' / 'addon.xml').write_text('<addon/>')
+        result = self.run_script('--lang', 'de')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.tmdbhelper_language(), 'de-DE')
+        root = ET.parse(self.data / 'userdata' / 'addon_data' / 'plugin.video.themoviedb.helper' / 'settings.xml').getroot()
+        self.assertEqual(next(s.text for s in root.iter('setting') if s.get('id') == 'mpaa_prefix'), 'FSK')
+
+    def test_tmdbhelper_english_is_tmdbs_own(self):
+        make_zip(self.cwd, 'skin.confuse', '1.0')
+        self.fake_tmdbhelper()
+        result = self.run_script('--lang', 'en')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.tmdbhelper_language(), 'en-US')
+
+    def test_without_tmdbhelper_its_settings_stay_away(self):
+        make_zip(self.cwd, 'skin.confuse', '1.0')
+        result = self.run_script('--lang', 'en')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.data / 'userdata' / 'addon_data').exists())
+
     def test_refusals_change_nothing(self):
         make_zip(self.cwd, 'skin.confuse', '1.0')
         for args in (['--lang', 'xyz1'], ['--skin', 'unknown'], ['missing.zip'], ['--skin']):

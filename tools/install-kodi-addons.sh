@@ -16,7 +16,9 @@
 #                                            from mirrors.kodi.tv for the installed Kodi version.
 #                                            Japanese, Chinese and Korean switch the skin's fonts to
 #                                            Arial (Kodi's own font with those scripts), any other
-#                                            language back to Default.
+#                                            language back to Default. TMDb Helper, when installed,
+#                                            looks titles up in the same language (English: en-US,
+#                                            TMDb's own).
 #
 # Kodi registers an add-on it finds on disk as disabled, so every add-on installed here is enabled
 # in Kodi's add-on database as well.
@@ -132,6 +134,43 @@ PY
 
 # enable add-ons in Kodi's add-on database (the newest Addons<n>.db); one Kodi has not seen yet is
 # entered as installed and enabled, so its scan on start leaves it that way
+tmdbhelper_language() {
+    # TMDb Helper's "language" setting is an index into its LANGUAGES (tmdbhelper/lib/addon/consts.py,
+    # read from the installed copy so the two cannot drift): Kodi's de_de is TMDb's de-DE, a
+    # country TMDb lacks takes the first of that language, English stays en-US
+    local consts="$ADDONS/plugin.video.themoviedb.helper/resources/tmdbhelper/lib/addon/consts.py"
+    [ -f "$consts" ] || return 0
+    python3 - "$consts" "$DATA/userdata/addon_data/plugin.video.themoviedb.helper/settings.xml" "$1" <<'PY'
+import ast, os, re, sys, xml.etree.ElementTree as ET
+consts, path, code = sys.argv[1:4]
+match = re.search(r'^LANGUAGES = (\([^)]*\))', open(consts, encoding='utf-8').read(), re.M)
+if not match:
+    sys.exit(0)
+languages = ast.literal_eval(match.group(1))
+lang, _, country = code.partition('_')
+wanted = 'en-US' if lang == 'en' else '{}-{}'.format(lang, country.upper())
+if wanted not in languages:
+    wanted = next((l for l in languages if l.startswith(lang + '-')), None)
+if wanted is None:
+    print('TMDb Helper has no {}, its language stays as it was'.format(code))
+    sys.exit(0)
+if os.path.exists(path):
+    tree = ET.parse(path)
+    root = tree.getroot()
+else:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    root = ET.Element('settings', version='2')
+    tree = ET.ElementTree(root)
+setting = next((s for s in root.iter('setting') if s.get('id') == 'language'), None)
+if setting is None:
+    setting = ET.SubElement(root, 'setting', id='language')
+setting.attrib.pop('default', None)
+setting.text = str(languages.index(wanted))
+tree.write(path, encoding='utf-8')
+print('TMDb Helper looks up in {}'.format(wanted))
+PY
+}
+
 enable_addons() {
     python3 - "$DATA/userdata/Database" "$@" <<'PY'
 import datetime, pathlib, re, sqlite3, sys
@@ -237,6 +276,7 @@ if [ -n "$lang" ]; then
     esac
     set_setting lookandfeel.font "$font"
     echo "Kodi starts in ${lang#resource.language.}, fonts $font"
+    tmdbhelper_language "${lang#resource.language.}"
 fi
 
 exec flatpak run "$APP"

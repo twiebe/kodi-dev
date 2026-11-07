@@ -347,7 +347,8 @@ tools/install-kodi-addons.sh --lang ja             # and the language (downloade
 
 It quits a running Kodi first, enables what it installed in Kodi's add-on
 database (Kodi registers an add-on it finds on disk as disabled) and writes
-skin, language and fontset into `guisettings.xml`. `--help` lists it all.
+skin, language and fontset into `guisettings.xml`; TMDb Helper gets the
+same language for its lookups. `--help` lists it all.
 `tests/test_install_script.py` runs it against a fake home.
 
 ## Known quirks
