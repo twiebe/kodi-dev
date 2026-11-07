@@ -331,6 +331,25 @@ To sign in by hand instead (VNC, or `kdev action`): server
 `perf/plugin.video.kodidev.slowwidget` is a widget source that answers after
 `?delay=` seconds, to see a skin's loading indicators.
 
+## Installing on a desktop Kodi
+
+`tools/install-kodi-addons.sh` puts add-on zips into the Flatpak Kodi
+(`tv.kodi.Kodi`) of the machine it runs on, the real one, not a kdev
+instance, and starts Kodi. Run it in the folder with the zips (the build
+output, e.g. `/dist`):
+
+```
+tools/install-kodi-addons.sh                       # newest zip of each default add-on here
+tools/install-kodi-addons.sh A.zip B.zip           # only these
+tools/install-kodi-addons.sh --skin confuse        # and switch the skin
+tools/install-kodi-addons.sh --lang ja             # and the language (downloaded if missing)
+```
+
+It quits a running Kodi first, enables what it installed in Kodi's add-on
+database (Kodi registers an add-on it finds on disk as disabled) and writes
+skin, language and fontset into `guisettings.xml`. `--help` lists it all.
+`tests/test_install_script.py` runs it against a fake home.
+
 ## Known quirks
 
 - Kodi waits for add-on service threads on exit and kills each service after
