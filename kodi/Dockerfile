@@ -1,6 +1,14 @@
 # Kodi comes from Debian. DEBIAN_SUITE picks the suite, KODI_VERSION is an apt
 # version glob within it (see .env.example for which suite has which version).
 ARG DEBIAN_SUITE=forky
+
+# The frame cap (swapcap.c), built against the same suite's libc
+FROM debian:${DEBIAN_SUITE}-slim AS swapcap
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY swapcap.c /src/swapcap.c
+RUN gcc -O2 -shared -fPIC -o /src/libswapcap.so /src/swapcap.c -ldl
+
 FROM debian:${DEBIAN_SUITE}-slim
 
 ARG UID=1000
@@ -34,6 +42,7 @@ RUN groupadd -g ${GID} kodi \
 
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY install_deps.py enable_addons.py /usr/local/lib/kodi-dev/
+COPY --from=swapcap /src/libswapcap.so /usr/local/lib/kodi-dev/libswapcap.so
 COPY userdata/ /usr/local/share/kodi-dev/userdata/
 
 RUN install -d -m 1777 /tmp/.X11-unix

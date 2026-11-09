@@ -49,6 +49,11 @@ services:
       # Kodi's render loop on Xvfb (no vblank): a Kodi playing video then takes 11 cores at 360
       # fps. Two threads give about 95 fps at 2 cores, playback stays in real time.
       LP_NUM_THREADS: ${KODI_LP_THREADS:-2}
+      # at most this many frames a second (kodi/swapcap.c), 0: no cap. 30 takes a pool of 8 from a
+      # load of 9 to 6.6 at the same run time; 15 saves little more and slows the main loop
+      # (input waits for the frame), so the rail tests fail. A test can raise it for a while
+      # through temp/fps_cap (the skin's e2e marker fps(N)).
+      KODI_FPS_CAP: ${KODI_FPS_CAP:-30}
     volumes:
       - ${KDEV_DATA:-./data}/kodi:/home/kodi/.kodi
       - ${ADDON_DIR:?set ADDON_DIR in .env}:/home/kodi/.kodi/addons/${ADDON_ID:?set ADDON_ID in .env}
