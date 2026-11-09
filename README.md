@@ -161,6 +161,9 @@ folder `instances/NAME/data/` and host ports. The default environment
 - `KODI_FPS_CAP` (default 30) caps Kodi's frames a second (`kodi/swapcap.c`, loaded with
   LD_PRELOAD around the buffer swap); 0 turns it off. A number in `temp/fps_cap` of an
   instance's Kodi folder overrides it while the file exists (read every 0.25 s).
+- `KODI_GDB=1` runs Kodi under gdb: the stack trace of a crash goes to `temp/kodi-gdb.log` of
+  the instance's Kodi folder (this box allows no core files, so Kodi's own crash log has none).
+  Slower; for hunting a crash, e.g. `KODI_GDB=1 ./kdev pool up 6`.
 - Each Docker daemon only sees its own containers, but `/workspaces` may be
   shared between machines or devcontainers: there, instances also keep the
   data folders apart.

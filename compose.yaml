@@ -54,6 +54,9 @@ services:
       # (input waits for the frame), so the rail tests fail. A test can raise it for a while
       # through temp/fps_cap (the skin's e2e marker fps(N)).
       KODI_FPS_CAP: ${KODI_FPS_CAP:-30}
+      # 1: Kodi runs under gdb, which writes the stack trace of a crash to temp/kodi-gdb.log (the
+      # box allows no core files, so Kodi's own crash log has none). Slower, for hunting a crash
+      KODI_GDB: ${KODI_GDB:-0}
     volumes:
       - ${KDEV_DATA:-./data}/kodi:/home/kodi/.kodi
       - ${ADDON_DIR:?set ADDON_DIR in .env}:/home/kodi/.kodi/addons/${ADDON_ID:?set ADDON_ID in .env}

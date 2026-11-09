@@ -42,7 +42,17 @@ while [ "$stopping" = 0 ]; do
         export KODI_FPS_CAP_FILE="$KODI_HOME/temp/fps_cap"
         preload=/usr/local/lib/kodi-dev/libswapcap.so
     fi
-    LD_PRELOAD=$preload kodi --standalone --windowing=x11 --audio-backend=pulseaudio &
+    if [ "${KODI_GDB:-0}" = 1 ]; then
+        # KODI_GDB: kodi.bin under gdb, the stack trace of a crash appended to temp/kodi-gdb.log
+        echo "==== $(date -u '+%Y-%m-%d %H:%M:%S') Kodi starts under gdb" >> "$KODI_HOME/temp/kodi-gdb.log"
+        export __GL_YIELD=USLEEP MALLOC_MMAP_THRESHOLD_=131072  # as Debian's kodi launcher
+        gdb -q -batch -ex 'set pagination off' -ex 'handle SIGPIPE SIG32 SIG33 SIG34 SIG35 nostop noprint pass' \
+            -ex "set environment LD_PRELOAD=$preload" -ex run -ex 'thread apply all bt' \
+            --args /usr/lib/x86_64-linux-gnu/kodi/kodi.bin --standalone --windowing=x11 \
+            --audio-backend=pulseaudio >> "$KODI_HOME/temp/kodi-gdb.log" 2>&1 &
+    else
+        LD_PRELOAD=$preload kodi --standalone --windowing=x11 --audio-backend=pulseaudio &
+    fi
     kodi_pid=$!
     python3 /usr/local/lib/kodi-dev/enable_addons.py "$KODI_HOME/addons" &
     wait "$kodi_pid"

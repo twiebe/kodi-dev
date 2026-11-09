@@ -16,7 +16,8 @@ ARG GID=1000
 ARG KODI_VERSION=2:21.3*
 
 # Kodi 21 (Omega) from Debian, a virtual X display with software GL (mesa),
-# a VNC server to watch it, and tools for screenshots and builtin commands.
+# a VNC server to watch it, and tools for screenshots and builtin commands;
+# gdb for the stack trace of a crash (KODI_GDB in compose.yaml).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         "kodi=${KODI_VERSION}" \
@@ -35,6 +36,7 @@ RUN apt-get update \
         ca-certificates \
         procps \
         sqlite3 \
+        gdb \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd -g ${GID} kodi \
